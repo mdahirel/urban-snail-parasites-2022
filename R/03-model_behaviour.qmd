@@ -1,0 +1,388 @@
+---
+title: "Modelling the effect of urbanization, shell phenotype and infection status on behaviour"
+format: html
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r load-packages}
+library(brms) # CRAN v2.22.0
+library(cmdstanr) # https://bbsbayes.r-universe.dev v0.8.0
+library(ggtext) # CRAN v0.1.2
+library(ncf) # CRAN v1.3-2
+library(patchwork) # CRAN v1.3.0
+library(rptR) # CRAN v0.9.22
+library(sf) # CRAN v1.0-19
+library(tidyverse) # CRAN v2.0.0
+library(tidybayes) # CRAN v3.0.7
+
+library(here) # CRAN v1.0.1
+
+options(mc.cores = 4)
+```
+
+We first start by importing the raw datasets
+
+```{r import-raw}
+sites <- read_sf(here("data", "gpkg", "sites.gpkg"))
+
+centroid <- read_sf(here("data", "gpkg", "UCDB_centroid.gpkg")) |>
+  st_transform(st_crs(sites))
+
+snail_size <- read_csv(here("data", "snail_phenotype", "snail_shell_size.csv"))
+
+snail_colour <- read_csv(here("data", "snail_phenotype", "colour_cornu.csv"))
+
+snail_behav <- read_csv(here("data", "snail_phenotype", "snail_behaviour.csv"))
+
+parasites <- read_csv(here("data", "parasites", "combined_parasites_occurrence.csv")) |>
+  mutate(
+    other_nematodes = as.numeric((nematodes_lung + nematodes_bw_shell_body) > 0),
+    sporocerc = as.numeric((sporocysts + cercariae) > 0)
+  )
+```
+
+(For the description of the columns in `sites`,`centroid`, `snail_size`, `snail_colour` and `parasites`, see the `01-model_size_colour` and `02-model_parasites` scripts)
+
+The `snail_behav` dataset contains the following columns:
+
+- `SiteID`: a site numbered ID
+- `Species`: in the format [genus]_[species]. We only use data from *Cornu aspersum* in this study.
+- `SnailID`: unique snail ID, following a [`SiteID`][unique letter]_[first two letters of genus] format
+- `datetest_[number]`: date of behavioural test [number]
+- `dist_[number]` and `time_[number]`: distances and times to use in calculating mobility speed for behavioural trial [number]
+- `food_[number]`: food consumed (in g) in trial [number]
+- `early_death`: a flag identifying which snails died prematurely during the experiment
+
+# Process data
+
+We create the "distance to urban centroid" variable, and create explicit columns for the sites XY coordinates, that will be useful for diagnostics of residual spatial autocorrelation:
+
+```{r distances-urban}
+sites$dist_urban <- as.numeric(st_distance(sites, centroid)[, 1])
+
+sites$coordX <- st_coordinates(sites)[, 1]
+sites$coordY <- st_coordinates(sites)[, 2]
+```
+
+
+```{r make-table}
+tab_behav <- snail_behav |>
+  filter(Species == "Cornu_aspersum") |>
+  # we need data in long_format
+  pivot_longer(c(datetest_1, datetest_2, time_1, time_2, dist_1, dist_2, food_1, food_2),
+    names_to = c(".value", "trial"),
+    names_sep = "_",
+  ) |>
+  mutate(
+    speed = dist / time, ## units are mm and s
+    trial = as.numeric(trial)
+  ) |>
+  left_join(snail_size) |>
+  left_join(snail_colour) |>
+  left_join(parasites) |>
+  left_join(sites) |>
+  mutate(size = (diameter_mm_1 + diameter_mm_2) / 2)
+```
+
+We get some useful statistics for the Methods
+```{r useful-stats}
+## among the dead ones, how many died between trials vs before all trials?
+tab_behav |>
+  group_by(early_death, SnailID) |>
+  summarise(ntrials = sum(!is.na(dist))) |>
+  group_by(early_death) |>
+  count(ntrials)
+
+# excluding the missing values, how many speed records do we have?
+sum(!is.na(tab_behav$speed))
+tab_behav |>
+  filter(!is.na(speed)) |>
+  summarise(n = n_distinct(SnailID))
+
+# same as above, but for food
+tab_behav |>
+  group_by(early_death, SnailID) |>
+  summarise(ntrials = sum(!is.na(food))) |>
+  group_by(early_death) |>
+  count(ntrials)
+
+sum(!is.na(tab_behav$food))
+tab_behav |>
+  filter(!is.na(food)) |>
+  summarise(n = n_distinct(SnailID))
+
+## we note that we have more food than speed records. This is because some non-dead snails were inactive despite our efforts during at least one movement trial (so NA) but did provide valid food records the night after
+```
+
+```{r scaling-predictors}
+tab_behav$size_scaled <- scale(tab_behav$size)[, 1]
+
+tab_behav$reflect_scaled <- scale(tab_behav$avg_reflectance)[, 1]
+tab_behav$sigma_reflect_scaled <- tab_behav$sigma_reflectance / sd(tab_behav$avg_reflectance)
+
+sd_size <- sd(tab_behav$size)
+mean_size <- mean(tab_behav$size)
+sd_reflect <- sd(tab_behav$avg_reflectance)
+mean_reflect <- mean(tab_behav$avg_reflectance)
+```
+
+For food, we note that some values are 0s, which cannot be analyzed using Beta models:
+```{r food-check1}
+table(is.na(tab_behav$food))
+table(tab_behav$food > 0)
+```
+
+Given the limited number of these values and the measurement uncertainty, we'll modify them so that they are instead at a low value = to the measurement detection threshold. Alternatively we could have attempted to use censoring in model, but as of writing, there are issues with correctly including censoring and missing values for non-gaussian models
+
+```{r food-check2}
+tab_behav$food2 <- case_when(
+  tab_behav$food == 0 ~ 0.01,
+  T ~ tab_behav$food
+)
+
+# reminder: we'll need to divide by two to get values to the Beta 0-1 interval in the model, because 2g of food were given
+```
+
+# The model
+
+```{r brm-formulas}
+bf_food <- bf(
+  food2/2 | mi() ~
+    size_scaled +
+    me(reflect_scaled, sigma_reflect_scaled) +
+    scale(dist_urban) +
+    nematodes_genitalia + other_nematodes + metacercariae + sporocerc +
+    (1 | p | SiteID) + (1 | q | SnailID),
+  nlf(phi ~ 1 / invphi),
+  lf(invphi ~ 1),
+  family = Beta(link = "logit", link_phi = "identity")
+)
+
+bf_speed <- bf(
+  speed | mi() ~
+    size_scaled +
+    me(reflect_scaled, sigma_reflect_scaled) +
+    scale(dist_urban) +
+    nematodes_genitalia + other_nematodes + metacercariae + sporocerc +
+    (1 | p | SiteID) + (1 | q | SnailID),
+  family = weibull
+)
+# weibull on speed has better pp_check properties than gamma or lognormal (not perfect, but way better)
+```
+
+
+```{r model}
+mod <- brm(mvbf(bf_food, bf_speed, rescor = FALSE),
+  data = tab_behav,
+  backend = "cmdstanr",
+  seed = 42,
+  iter = 6000, warmup = 3000, control = list(adapt_delta = 0.9),
+  save_pars = save_pars(group = TRUE, latent = TRUE),
+  prior = c(
+    set_prior("normal(0,1.5)", class = "Intercept", resp = "food22"),
+    set_prior("normal(0,1)", class = "Intercept", resp = "speed"),
+    set_prior("normal(0,1)", class = "b", resp = c("speed", "food22")),
+    set_prior("normal(0,1)", class = "sd", resp = c("speed", "food22")),
+    set_prior("exponential(1)", class = "shape", resp = "speed"),
+    set_prior("exponential(1)", nlpar = "invphi", resp = "food22", class = "b", lb = 0),
+    set_prior("lkj(2)", class = "cor")
+  )
+)
+```
+
+It's a little trickier to get pp_checks using the ready-made function from brms with missing data imputed using `mi()`, so we'll have to go directly to the underlying functions brms use
+
+```{r ppchecks}
+fit <- posterior_predict(mod, resp = "speed", newdata = filter(tab_behav, !is.na(speed)))
+
+bayesplot::ppc_dens_overlay_grouped(
+  y = filter(tab_behav, !is.na(speed))$speed,
+  yrep = fit[1:50, ],
+  group = filter(tab_behav, !is.na(speed))$SiteID
+)
+
+fit <- posterior_predict(mod, resp = "food22", newdata = filter(tab_behav, !is.na(food2))) * 2
+
+bayesplot::ppc_dens_overlay_grouped(
+  y = filter(tab_behav, !is.na(food2))$food2,
+  yrep = fit[1:50, ],
+  group = filter(tab_behav, !is.na(food2))$SiteID
+)
+
+# newdata because otherwise fails with mi()
+```
+
+We again check the residual spatial autocorrelation:
+
+```{r residual-autocor}
+residuals_food <- residuals(mod,
+  resp = "food22", re_formula = ~ (1 | SiteID/SnailID), # type="pearson",
+  summary = TRUE
+)[, 1]
+
+pp <- spline.correlog(
+  x = tab_behav$coordX / 1000, y = tab_behav$coordY / 1000,
+  z = residuals_food,
+  na.rm=TRUE
+)
+
+plot(pp)
+
+residuals_speed <- residuals(mod,
+  resp = "speed", re_formula = ~ (1 | SiteID/SnailID), # type="pearson",
+  summary = TRUE
+)[, 1]
+
+pp <- spline.correlog(
+  x = tab_behav$coordX / 1000, y = tab_behav$coordY / 1000,
+  z = residuals_speed,
+  na.rm=TRUE
+)
+
+plot(pp)
+```
+
+# Get info for Table and Results
+
+```{r summary}
+summary(mod)
+
+# summary has 1/phi, get phi on the precision scale back:
+posterior_epred(mod, newdata = tab_behav[1, ], resp = "food22", dpar = "phi") |> mean_qi()
+```
+
+```{r bayes-R2}
+bayes_R2(mod, resp = "speed", newdata = filter(tab_behav, !is.na(speed)), re_formula = NA)
+bayes_R2(mod, resp = "speed", newdata = filter(tab_behav, !is.na(speed)))
+
+
+bayes_R2(mod, resp = "food22", newdata = filter(tab_behav, !is.na(food2)), re_formula = NA)
+bayes_R2(mod, resp = "food22", newdata = filter(tab_behav, !is.na(food2)))
+```
+
+# Plots 
+
+```{r plot-food1-fig4}
+fits_food1 <- tibble(
+  size = c(255:410) / 10,
+  dist_urban = mean(tab_behav$dist_urban),
+  reflect_scaled = 0,
+  sigma_reflect_scaled = mean(tab_behav$sigma_reflect_scaled),
+  food_censor = "none",
+  nematodes_genitalia = 0,
+  other_nematodes = 0,
+  sporocerc = 0,
+  metacercariae = 0
+) |>
+  mutate(size_scaled = (size - mean_size) / sd_size) |>
+  add_epred_draws(mod, resp = "food22", re_formula = NA)
+
+p_food1 <- ggplot(tab_behav) +
+  stat_lineribbon(data = fits_food1, aes(size, .epred * 2), fill = "grey", .width = 0.95) +
+  geom_point(aes(size, food, pch = food == 0), col = "grey40", alpha = 0.25) +
+  labs(x = "Shell size (mm)", y = "Food intake (g per test session)") +
+  theme_bw() +
+  theme(legend.position = "none")
+
+p_food1
+
+ggsave(filename = here("R_output", "Fig4.pdf"), width = 4, height = 4)
+```
+
+```{r plot-food2}
+fits_food2 <- tibble(
+  size_scaled = 0,
+  dist_urban = mean(tab_behav$dist_urban),
+  reflect_scaled = 0,
+  sigma_reflect_scaled = mean(tab_behav$sigma_reflect_scaled),
+  food_censor = "none",
+  nematodes_genitalia = 0,
+  other_nematodes = 0,
+  sporocerc = c(0, 1),
+  metacercariae = 0
+) |>
+  add_epred_draws(mod, resp = "food22", re_formula = NA)
+
+p_food2 <- ggplot(tab_behav) +
+  stat_eye(data = fits_food2, aes(sporocerc, .epred), fill="grey", .width = c(0, 0.95)) +
+  geom_segment(
+    data = snail_behav |> # drawing is easier if behaviours are in wide format, so we go back to there
+      filter(Species == "Cornu_aspersum") |>
+      left_join(parasites),
+    aes(
+      x = sporocerc - 0.25, xend = sporocerc + 0.25,
+      y = food_1, yend = food_2
+    ),
+    col = "grey70", alpha = 0.25
+  ) +
+  geom_point(
+    aes(
+      sporocerc + 0.5 * (trial - 1.5), food,
+      pch = food == 0
+    ),
+    col = "grey40", alpha = 0.25
+  ) +
+  stat_eye(data = fits_food2, aes(sporocerc, .epred), .width = c(0, 0.95),fill=NA) +
+  labs(x = "Infected by sporocysts?", y = "Food intake (g per test session)") +
+  scale_x_continuous(breaks = c(0, 1), labels = c("no", "yes")) +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    axis.title.x = element_markdown()
+  )
+
+p_food2
+```
+
+
+```{r plot-speed}
+fits_speed <- tibble(
+  size_scaled = 0,
+  dist_urban = mean(tab_behav$dist_urban),
+  reflect_scaled = 0,
+  sigma_reflect_scaled = mean(tab_behav$sigma_reflect_scaled),
+  food_censor = "none",
+  nematodes_genitalia = c(0, 1),
+  other_nematodes = 0,
+  sporocerc = 0,
+  metacercariae = 0
+) |>
+  add_epred_draws(mod, resp = "speed", re_formula = NA)
+
+p_speed <- ggplot(tab_behav) +
+  stat_eye(data = fits_speed, aes(nematodes_genitalia, .epred), fill="grey",.width = c(0, 0.95)) +
+  geom_segment(
+    data = snail_behav |> # drawing is easier if behaviours are in wide format, so we go back to there
+      filter(Species == "Cornu_aspersum") |>
+      left_join(parasites),
+    aes(
+      x = nematodes_genitalia - 0.25, xend = nematodes_genitalia + 0.25,
+      y = dist_1 / time_1, yend = dist_2 / time_2
+    ),
+    col = "grey70", alpha = 0.25
+  ) +
+  geom_point(
+    aes(
+      nematodes_genitalia + 0.5 * (trial - 1.5), speed,
+    ),
+    col = "grey40", alpha = 0.25
+  ) +
+  stat_eye(data = fits_speed, aes(nematodes_genitalia, .epred), .width = c(0, 0.95), fill=NA) +
+  labs(x = "Infected by _Nemhelix bakeri_?", y = "Movement speed (mm/s)") +
+  scale_x_continuous(breaks = c(0, 1), labels = c("no", "yes")) +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    axis.title.x = element_markdown()
+  )
+
+p_speed
+```
+
+```{r fig5}
+(p_food2 | p_speed)
+
+ggsave(filename = here("R_output", "Fig5.pdf"), width = 8, height = 4)
+```

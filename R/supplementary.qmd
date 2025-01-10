@@ -1,0 +1,568 @@
+---
+title: "How does urbanization shape shell phenotype, behaviour and parasite prevalence in the snail _Cornu aspersum_? - supplementary material"
+author: "Maxime Dahirel, Youna De Tombeur, Claudia Gérard, Armelle Ansart"
+format: pdf
+editor_options: 
+  chunk_output_type: console
+header-includes:
+  - \usepackage{amsmath}
+bibliography: bib_suppl.bib
+---
+
+```{r packages}
+#| echo: false
+#| message: false
+#| output: false
+library(brms) # CRAN v2.22.0
+library(FactoMineR) # CRAN v2.11
+library(patchwork) # CRAN v1.3.0
+library(sp) # CRAN v2.1-4
+# sp used for decimal to DMS conversion of latlon for S4 table
+library(sf) # CRAN v1.0-19
+library(tidybayes) # CRAN v3.0.7
+library(tidyverse) # CRAN v2.0.0
+
+library(here) # CRAN v1.0.1
+```
+
+```{r data}
+#| echo: false
+#| message: false
+#| output: false
+sites <- read_sf(here("data", "gpkg", "sites.gpkg"))
+centroid <- read_sf(here("data", "gpkg", "UCDB_centroid.gpkg")) |>
+  st_transform(st_crs(sites))
+
+parasites <- read_csv(here("data", "parasites", "combined_parasites_occurrence.csv")) |>
+  mutate(
+    other_nematodes = as.numeric((nematodes_lung + nematodes_bw_shell_body) > 0),
+    sporocerc = as.numeric((sporocysts + cercariae) > 0)
+  ) |>
+  filter(Species == "Cornu_aspersum")
+```
+
+# S1 - Correlations between urbanization metrics
+
+```{r}
+#| echo: false
+#| message: false
+#| output: false
+
+# We load the environmental variables, and filter to keep only sites where _Cornu aspersum_ were found. We then compute the distances to the urban centroid
+# use (already filtered, see above) parasite dataset to create filter
+with_Cornu <- parasites |>
+  select(SiteID) |>
+  distinct()
+
+envt <- read_csv(here("data", "environment", "OCSGE_landcover.csv")) |>
+  mutate(has_Cornu = SiteID %in% with_Cornu$SiteID) |>
+  mutate(dist_urban = as.numeric(st_distance(sites, centroid)[, 1]))
+
+envt <- filter(envt, has_Cornu) |>
+  rename_with(~ str_replace(., "anthropised", "artificialized"))
+```
+
+```{r corrmatrices}
+#| echo: false
+#| message: false
+#| output: false
+
+
+corr_full <- envt |>
+  select(starts_with("artificialized"), starts_with("built")) |>
+  cor()
+
+corr_built <- envt |>
+  select(starts_with("built")) |>
+  cor()
+
+corr_artificial <- envt |>
+  select(starts_with("artificialized")) |>
+  cor()
+```
+
+In the main text, we described how we used distance to the city centroid as our only urbanization variable, as it was strongly correlated with built-up/artificial surfaces % at all scales of interest and these were in turn strongly correlated with each other. We explore this in more detail here.
+
+Correlation coefficients _r_ between any two built-up/artificial surfaces metrics (at any buffer width considered) ranged from `r round(min(corr_full),2)` to `r round(max(corr_full),2)` with an average _r_ of `r round(mean(corr_full),2)`. When focusing only on correlations between built-up values at different buffer widths, the distribution of correlation coefficients is similar (`r round(min(corr_built),2)` to `r round(max(corr_built),2)`, with a mean of `r round(mean(corr_built),2)`). When considering only artificial surfaces % values, correlations are even higher (`r round(min(corr_artificial),2)` to `r round(max(corr_artificial),2)`, with a mean of `r round(mean(corr_artificial),2)`).
+
+```{r pca}
+#| echo: false
+#| message: false
+#| output: false
+PCdata <- envt |>
+  select(-c(SiteID, dist_urban, has_Cornu)) |>
+  as.data.frame()
+
+rownames(PCdata) <- envt$SiteID
+
+ACP <- PCA(PCdata)
+
+PC1_corrs <- dimdesc(
+  ACP,
+  axes = 1,
+  proba = 1 # we set the max p.value to keep at 1 to keep all variables
+  ## unnecessary here since all are correlated with PC1 with p<<<0.05, but for completeness' sake
+)$Dim.1 |> as.data.frame()
+
+PCplot_ind <- plot(ACP, choix = "ind", graph.type = "ggplot", label = "ind") +
+  ggtitle("PCA graph of sites") +
+  coord_equal(ratio = 1.5) # aspect ratio slightly tweaked to make sites plot doesn't take too much room in final combined plot
+
+PCplot_var <- plot(ACP, choix = "var", graph.type = "ggplot", label = "ind")
+```
+
+Considering this, approaches attempting to find a best land cover metric and a best scale to use in our analyses were likely to fail, as metrics and scales would be likely difficult to disentangle from each other. We ran a Principal Component Analysis and found indeed that the first axis of the PCA explained most (`r round(ACP$eig["comp 1","percentage of variance"],2)`%) of the variation in our land cover data, and that all metrics were strongly correlated to it (**Fig. S1-1**; mean correlation of included metrics with PC1: `r round(mean(PC1_corrs$quanti.correlation),2)`, range: `r round(min(PC1_corrs$quanti.correlation),2)` to `r round(max(PC1_corrs$quanti.correlation),2)`). 
+
+Additionally, while it was **not** included in the PCA, distance to the urban centroid was nonetheless also strongly correlated to that first PC axis (_r_ = `r round(cor(envt$dist_urban, ACP$ind$coord[, 1]),2)`). We therefore used distance to the city centroid as the sole urbanization variable in our analyses.
+
+```{r}
+#| echo: false
+#| message: false
+#| height: 2
+(PCplot_ind | PCplot_var)
+```
+
+**Figure S1-1.** Principal Component Analysis of urbanization-related land cover variables (built-up % and all artificialized surfaces %) for the 17 sites (out of 20 prospected) where _Cornu aspersum_ snails were found.
+
+# S2 - Reflectance measurements - extended methods
+
+As mentioned in the main text, we measured shell reflectance using standardised photographs of cleaned and dried shells pleaced near a grey standard card with 9 rectangular cells (7 greys, one white, one black, **Fig. S2-1**), with the grey scale reflectance values for each rectangle previously determined using spectrophotometry. 
+
+To determine these, the diffuse reflectance was measured using a AvaSpec-2048 spectrometer and a dual light source set-up (AvaLight-DH-S deuterium halogen and AvaLight-HAL-S-MINI light source) with a bifurcated probe and integrating sphere (AvaSphere-50-REFL). A white reflectance standard (WS-2, Avantes) and black standard (BS-2, Avantes) were used for standardization. For five randomly selected cards, three replicates of each rectangle per card were measured. Reflectance spectra were processed using the _pavo_ R package [@maiaPavo2New2019], and mean reflectance obtained for each grey cell by averaging the values for the three replicates of each card, then averaging these values across the five replicate cards (see **Data and code availability** in the main text for resulting values).
+
+We converted white balanced RAW images to TIFF files to use in ImageJ/Fiji [@schindelinFijiOpensourcePlatform2012], and for each image, we measured the average RGB values of each cell of the grey standard, along with an area of interest on the snail shell (see below). We used values from the grey standards to fit exponential calibration curves for each channel of each individual image, linking the average RGB values of an area of interest to its average grey scale reflectance [@johnsenHowMeasureColor2016]. All R, G and B calibration curves had very good performances (mean correlation between observed and predicted: 0.998; range: 0.986 - 1).
+
+Periostracum, the outer pigmented layer of the shell, typically gets increasingly damaged and worn as snails age [@williamsonAgeDeterminationJuvenile1979]. Because of this, we did not measure the average RGB values over the entire shell, as they would not be an accurate representation of colour as it was produced by the snails. We instead measured mean RGB values of an unworn rectangular area covering the entire height of the largest (= most recent) whorl (**Fig. S2-1**). The selected rectangle was parallel to growth lines (which are at an angle compared to the columellar axis) and as close as possible to the columellar axis; its exact positioning and width varied so that no areas with worn periostracum were included. This had the added benefit of avoiding areas with light reflections and the presence of the individual paint marks in some images. We used the average predicted reflectance across RGB channels in our further analyses. 
+
+![](Fig_S2_1.jpg){width=80%}
+
+**Figure S2-1.** Example photograph used in reflectance analysis, showing both the snail shell in dorsal view and the grey standard card. The yellow rectangle highlights the area of the shell typically used in measurements.
+
+We used the _errors_ R package [@ucarMeasurementErrors2018] to correctly propagate the uncertainty from R, G, B channel predictions to their average via the Taylor series method, and accounted for it in our models (see **Statistical analyses** in the main text). Indeed, while the calibration curves had very good overall performance, we found that prediction uncertainty/residual standard deviation could not be neglected when these curves were applied to specifically _Cornu aspersum_ shells. This is because, while prediction uncertainty was small compared to the entire range of the grey standard, _C. aspersum_ shells are all relatively dark, i.e. with consistently small reflectance values. Indeed, estimated prediction uncertainty was on average 5.94% of estimated predicted value (range: 2.67% - 22.27%). 
+
+# S3 - Overview of models
+
+General notes:  
+
+- All parameters interpretable as "fixed-effects" coefficients are denoted as $\beta$ (with intercepts as $\beta_0$), random intercepts as $\alpha$ or $\gamma$, while all parameters interpretable as standard deviations or standard errors are denoted as $\sigma$.
+
+- For notation simplicity, variables names are reset between models.  
+
+- All response variables in Gaussian models (so **Model 1** below), as well as all continuous predictors in all models, are assumed to be centred and scaled to unit 1 (observed) SD.
+
+## Model 1 - Effect of urbanization on shell phenotypic traits
+
+We can model the shell size (greater **D**iameter) $D_{i,j}$ of snail $j$ from site $i$ and their shell reflectance (**C**olour) $C_{i,j}$ as correlated variables. As shell size measurement error is extremely low (see main text **Methods**), we ignore it for modelling purposes. However, this is not the case for reflectance (see **Supplementary Material S2** above and file `00a-colour_calibration` in archived code for details); we therefore explicitly model the true (unknown) reflectance $C_{i,j}$ from the observed measurement $C_{i,j[obs]}$ and its associated measurement error $\sigma_{i,j[obs, C]}$ [@mcelreathStatisticalRethinkingBayesian2020]: 
+
+$$
+C_{i,j[obs]} \sim \mathrm{Normal}(C_{i,j},\sigma_{i,j[obs, C]}),\\
+$$
+$$
+\begin{bmatrix} C_{i,j} \\ D_{i,j}  \end{bmatrix} 
+\sim 
+\textrm{MVNormal}
+\begin{pmatrix}
+\begin{bmatrix} \mu_{i[C]} \\ \mu_{i[D]}  \end{bmatrix},
+\boldsymbol{\Omega}_{[residual]}
+\end{pmatrix},
+$$
+$$
+\boldsymbol{\Omega}_{[residual]} = 
+\begin{bmatrix}
+\sigma_{[C]} & 0\\
+0 & \sigma_{[D]}\\
+\end{bmatrix}
+\boldsymbol{R}_{[residual]}
+\begin{bmatrix}
+\sigma_{[C]} & 0\\
+0 & \sigma_{[D]}\\
+\end{bmatrix},
+$$
+where $\boldsymbol{R}_{[residual]}$ is the _residual_ (here snail-level) correlation between the two response variables.
+
+
+Expected values depend on predictors (here only urbanization $x_{1,i}$) and site identity as follows:
+
+$$
+\mu_{i[D]} = \beta_{0[D]} + \beta_{1[D]} \times x_{1,i} + \alpha_{i[D]},\\
+$$
+$$
+\mu_{i[C]} = \beta_{0[C]} + \beta_{1[C]} \times x_{1,i} + \alpha_{i[C]},\\
+$$
+with the site-level random intercepts $\alpha_{i}$ for each response linked together through a common variance-covariance matrix $\boldsymbol{\Omega}_{i}$:
+$$
+\begin{bmatrix} \alpha_{i[D]} \\ \alpha_{i[C]} \end{bmatrix} 
+\sim 
+\textrm{MVNormal}
+\begin{pmatrix}
+\begin{bmatrix} 0 \\ 0  \end{bmatrix},
+\boldsymbol{\Omega_{i}}
+\end{pmatrix},
+$$
+$$
+\boldsymbol{\Omega}_{i} = 
+\begin{bmatrix}
+\sigma_{\alpha[D]} & 0\\
+0 & \sigma_{\alpha[C]}\\
+\end{bmatrix}
+\boldsymbol{R}_{i}
+\begin{bmatrix}
+\sigma_{\alpha[D]} & 0\\
+0 & \sigma_{\alpha[C]}\\
+\end{bmatrix}.
+$$
+We used $\mathrm{Normal}(0,1)$ priors for the intercepts and fixed effects $\beta$, $\mathrm{Half-Normal}(0,1)$ priors for all $\sigma$s, and $\mathrm{LKJ}(2)$ priors for the correlation matrices $\boldsymbol{R}$.
+
+## Model 2 - Effect of urbanization and shell phenotype on parasites
+
+We can model **S**porocysts presence/absence $S_{i,j}$, **M**etacercariae presence/absence $M_{i,j}$, _Nemhelix **b**akeri_ presence/absence $B_{i,j}$, and the presence/absence of the **O**ther nematodes $O_{i,j}$ as follows: 
+
+$$
+S_{i,j} \sim \mathrm{Bernoulli}(p_{i,j[S]}),\\
+$$
+$$
+M_{i,j} \sim \mathrm{Bernoulli}(p_{i,j[M]}),\\
+$$
+$$
+B_{i,j} \sim \mathrm{Bernoulli}(p_{i,j[B]}),\\
+$$
+$$
+O_{i,j} \sim \mathrm{Bernoulli}(p_{i,j[O]}),\\
+$$
+$$
+\mathrm{logit}(p_{i,j[S]}) = \beta_{0[S]} + \sum_{n=1}^{N} (\beta_{n[S]} \times x_{n,i,j}) + \alpha_{i[S]},\\
+$$
+$$
+\mathrm{logit}(p_{i,j[M]}) = \beta_{0[M]} + \sum_{n=1}^{N} (\beta_{n[M]} \times x_{n,i,j}) + \alpha_{i[M]},\\
+$$
+$$
+\mathrm{logit}(p_{i,j[B]}) = \beta_{0[B]} + \sum_{n=1}^{N} (\beta_{n[B]} \times x_{n,i,j}) + \alpha_{i[B]},\\
+$$
+$$
+\mathrm{logit}(p_{i,j[O]}) = \beta_{0[O]} + \sum_{n=1}^{N} (\beta_{n[O]} \times x_{n,i,j}) + \alpha_{i[O]},\\
+$$
+
+where $x_{n,i,j}$ are the snail values for each of the $N$ predictor variables, here urbanization, shell size, shell reflectance [for a view of how uncertainty in shell reflectance is accounted for when on the predictor side, see @mcelreathStatisticalRethinkingBayesian2020]. As in the previous model, random intercepts $\alpha$ are linked through a shared variance-covariance matrix:
+
+$$
+\begin{bmatrix} \alpha_{i[S]} \\ \alpha_{i[M]}\\ \alpha_{i[B]}\\ \alpha_{i[O]} \end{bmatrix} 
+\sim 
+\textrm{MVNormal}
+\begin{pmatrix}
+\begin{bmatrix} 0 \\ 0 \\ 0 \\ 0  \end{bmatrix},
+\boldsymbol{\Omega}
+\end{pmatrix},
+$$
+$$
+\boldsymbol{\Omega} = 
+\begin{bmatrix}
+\sigma_{\alpha[S]} & 0 & 0 & 0\\
+0 & \sigma_{\alpha[M]} & 0 & 0\\
+0 & 0 &\sigma_{\alpha[B]} & 0\\
+0 & 0 & 0 &\sigma_{\alpha[O]}\\
+\end{bmatrix}
+\boldsymbol{R}
+\begin{bmatrix}
+\sigma_{\alpha[S]} & 0 & 0 & 0\\
+0 & \sigma_{\alpha[M]} & 0 & 0\\
+0 & 0 &\sigma_{\alpha[B]} & 0\\
+0 & 0 & 0 &\sigma_{\alpha[O]}\\
+\end{bmatrix}.
+$$
+We used $\mathrm{Normal}(0,1.5)$ priors for the intercepts $\beta_{0}$ [which are interpretable as the logit of proportions, @mcelreathStatisticalRethinkingBayesian2020], $\mathrm{Normal}(0,1)$ priors for the other fixed effects $\beta$, $\mathrm{Half-Normal}(0,1)$ priors for random effect SDs $\sigma$, and an $\mathrm{LKJ}(2)$ prior for the correlation matrix $\boldsymbol{R}$.
+
+## Model 3 - Effect of urbanization, shell phenotype and parasites on behaviour
+
+Finally, we can model the proportion of **F**ood consumed $F_{i,j,k}$ (site $i$, snail $j$, trial $k$) and movement **A**ctivity $A_{i,j,k}$ as follows:
+
+$$
+F_{i,j,k} \sim \mathrm{Beta}(p_{i,j[F]}, \phi_{[F]}),\\
+$$
+$$
+A_{i,j,k} \sim \mathrm{Weibull}(\mu_{i,j[A]}, \theta_{[A]}),
+$$
+where $\phi$ is a precision parameter, and $\theta$ a shape parameter (see <https://cran.r-project.org/web/packages/brms/vignettes/brms_families.html> \[accessed 2024-10-16\]).
+
+Formula for the means for each response can be written as:
+$$
+\mathrm{logit}(p_{i,j[F]}) = \beta_{0[F]} + \sum_{n=1}^{N} (\beta_{n[F]} \times x_{n,i,j}) + \alpha_{i[F]} + \gamma_{j[F]},\\
+$$
+$$
+\log(\mu_{i,j[A]}) = \beta_{0[A]} + \sum_{n=1}^{N} (\beta_{n[A]} \times x_{n,i,j}) + \alpha_{i[A]} + \gamma_{j[A]},\\
+$$
+with here random effects for both the site ($\alpha_i$) and snail ($\gamma_j$) levels due to repeated measurements. Both site- and snail-level random effects have their own variance-covariance matrix:
+
+$$
+\begin{bmatrix} \alpha_{i[F]} \\ \alpha_{i[A]} \end{bmatrix} 
+\sim 
+\textrm{MVNormal}
+\begin{pmatrix}
+\begin{bmatrix} 0 \\ 0  \end{bmatrix},
+\boldsymbol{\Omega_{\alpha}}
+\end{pmatrix},
+$$
+$$
+\begin{bmatrix} \gamma_{i[F]} \\ \gamma_{i[A]} \end{bmatrix} 
+\sim 
+\textrm{MVNormal}
+\begin{pmatrix}
+\begin{bmatrix} 0 \\ 0  \end{bmatrix},
+\boldsymbol{\Omega_{\gamma}}
+\end{pmatrix},
+$$
+$$
+\boldsymbol{\Omega_{\alpha}} = 
+\begin{bmatrix}
+\sigma_{\alpha[F]} & 0\\
+0 & \sigma_{\alpha[F]}\\
+\end{bmatrix}
+\boldsymbol{R_{\alpha}}
+\begin{bmatrix}
+\sigma_{\alpha[F]} & 0\\
+0 & \sigma_{\alpha[A]}\\
+\end{bmatrix},
+$$
+$$
+\boldsymbol{\Omega_{\gamma}} = 
+\begin{bmatrix}
+\sigma_{\gamma[F]} & 0\\
+0 & \sigma_{\gamma[F]}\\
+\end{bmatrix}
+\boldsymbol{R_{\gamma}}
+\begin{bmatrix}
+\sigma_{\gamma[F]} & 0\\
+0 & \sigma_{\gamma[A]}\\
+\end{bmatrix}.
+$$
+We set a $\mathrm{Normal}(0,1.5)$ prior for $\beta_{0[F]}$ (interpretable as the logit of a proportion, see **Model 2**) and $\mathrm{Normal}(0,1)$ priors for all other $\beta$s. As with previous models, we used  $\mathrm{Half-Normal}(0,1)$ priors for random effect SDs $\sigma$ and an $\mathrm{LKJ}(2)$ prior for the correlation matrices $\boldsymbol{R}$. We set $\mathrm{Exponential}(1)$ priors for both $1/\phi$ and $\theta$; note that for the Beta model we put the prior on the inverse of the precision (i.e. the dispersion), rather than the precision itself, to avoid setting too much much prior mass on high dispersion (see e.g. <https://github.com/stan-dev/stan/wiki/Prior-Choice-Recommendations#story-when-the-generic-prior-fails-the-case-of-the-negative-binomial>, \[accessed 2024-10-16\]).
+
+
+# S4 - Overview of parasite prevalences
+
+**Table S4-1.** Observed prevalences of each parasite type in sampled _Cornu aspersum_ snails, both per site and overall. Sites are ordered by increasing distance from the city centroid ("Distance (m)" column).
+
+```{r}
+#| echo: false
+#| message: false
+#| output: false
+siteinfo1 <- envt |>
+  mutate(dist_urban = as.character(round(dist_urban, 0))) |>
+  select(SiteID, dist_urban)
+
+siteinfo2 <- sites |>
+  st_transform(crs = "wgs84") |>
+  mutate(Longitude = st_coordinates(geom)[, 1], Latitude = st_coordinates(geom)[, 2]) |>
+  as_tibble() |>
+  select(SiteID, Longitude, Latitude)
+
+ppp <- parasites |>
+  select(SiteID, sporocerc, metacercariae, nematodes_genitalia, other_nematodes) |>
+  left_join(siteinfo1) |>
+  left_join(siteinfo2) |>
+  relocate(c(Longitude, Latitude, dist_urban), .after = 1) |>
+  mutate(SiteID = as.character(SiteID))
+
+pplon <- dd2dms(ppp$Longitude, NS = FALSE)
+pplat <- dd2dms(ppp$Latitude, NS = TRUE)
+
+pplon@sec <- round(pplon@sec)
+pplat@sec <- round(pplat@sec)
+
+ppp$Latitude <- as.character(pplat)
+ppp$Longitude <- as.character(pplon)
+
+ppp <- ppp |>
+  group_by(SiteID, Longitude, Latitude, dist_urban) |>
+  summarise(Nsnails = n(), Nsporo = sum(sporocerc), Nmeta = sum(metacercariae), Nnemhelix = sum(nematodes_genitalia), Nother = sum(other_nematodes)) |>
+  ungroup()
+
+ppp_total <- tibble(
+  SiteID = "---", Longitude = "---", Latitude = "---", dist_urban = "---",
+  Nsnails = sum(ppp$Nsnails),
+  Nsporo = sum(ppp$Nsporo),
+  Nmeta = sum(ppp$Nmeta),
+  Nnemhelix = sum(ppp$Nnemhelix),
+  Nother = sum(ppp$Nother)
+)
+
+pppp <- rbind(ppp, ppp_total)
+
+pppp <- pppp |>
+  mutate(
+    Psporo = sprintf("%.2f", round(Nsporo / Nsnails, 2)),
+    Pmeta = sprintf("%.2f", round(Nmeta / Nsnails, 2)),
+    Pnemhelix = sprintf("%.2f", round(Nnemhelix / Nsnails, 2)),
+    Pother = sprintf("%.2f", round(Nother / Nsnails, 2))
+  ) |>
+  mutate(
+    Psporo = paste0(Psporo, " (", Nsporo, "/", Nsnails, ")"),
+    Pmeta = paste0(Pmeta, " (", Nmeta, "/", Nsnails, ")"),
+    Pnemhelix = paste0(Pnemhelix, " (", Nnemhelix, "/", Nsnails, ")"),
+    Pother = paste0(Pother, " (", Nother, "/", Nsnails, ")")
+  ) |>
+  select(`Site ID` = "SiteID", `Distance (m)` = "dist_urban", Longitude, Latitude, Sporocysts = "Psporo", Metacercariae = "Pmeta", `\\textit{N. bakeri}` = "Pnemhelix", `Other nematodes` = "Pother") |>
+  mutate(
+    Longitude = str_replace(Longitude, "d", "°"),
+    Latitude = str_replace(Latitude, "d", "°")
+  )
+
+# we resplit to put the overall at the bottom of the table
+
+ppsites <- pppp |>
+  filter(`Site ID` != "---") |>
+  arrange(`Distance (m)`)
+ppoverall <- pppp |> filter(`Site ID` == "---")
+```
+
+
+```{r}
+#| echo: false
+#| message: false
+library(kableExtra) # CRAN v1.4.0
+kbl(rbind(ppsites, ppoverall), escape = FALSE) |>
+  kableExtra::pack_rows("Overall", start_row = 18, end_row = 18) |>
+  # kableExtra::group_rows(group_label = "",start_row=2,end_row=18) |>
+  add_header_above(c(" " = 4, "Prevalence of:" = 4)) |>
+  kable_styling(
+    position = "center",
+    latex_options = c("HOLD_position", "scale_down")
+  )
+```
+
+# S5 - Investigating the site-level correlation between reflectance and _N. bakeri_ prevalence
+
+In the main text, we ran analyses where individual shell traits were used as predictors for individual parasite prevalence. We found among other things that shell reflectance was linked to _Nemhelix bakeri_ prevalence (main text **Fig. 3**). At the same time, we found that for both reflectance and _N. bakeri_ prevalence, a substantial proportion of the total variance was at the population/site level.
+
+This raises a question that our original models were not designed to address. Is the link between _Nemhelix bakeri_ prevalence and reflectance due to individual-level correlations (i.e. even within a given population, lighter snails are more likely to be infected)? Or is it due to site-level correlations (sites with higher prevalence are also sites with on average lighter shells, possibly due to correlational selection, but there is no true link between the two at the individual level)?
+
+To explore this, we ran a new bivariate model where both reflectance and _N. bakeri_ prevalence were responses, correlated with each other through site-level random effects. Submodel families, and the way uncertainty in reflectance was dealt with, were the same as in the main models; no fixed effects were included. This new model allowed us to estimate the site-level correlation between the two responses (note that the residual individual-level correlation cannot be estimated from such a model due to prevalence being a binary response), and can be written as follows (see **Supplementary Material S3** for notation details):
+
+$$
+B_{i,j} \sim \mathrm{Bernoulli}(p_{i[B]}),\\
+$$
+$$
+C_{i,j[obs]} \sim \mathrm{Normal}(C_{i,j},\sigma_{i,j[obs, C]}),\\
+$$
+$$
+C_{i,j} \sim \mathrm{Normal}(\mu_{i[C]},\sigma_{[C]}),\\
+$$
+$$
+\mathrm{logit}(p_{i[B]}) = \beta_{0[B]} + \alpha_{i[B]},\\
+$$
+$$
+\mu_{i[C]} = \beta_{0[C]} + \alpha_{i[C]},\\
+$$
+$$
+\begin{bmatrix} \alpha_{i[B]} \\ \alpha_{i[C]} \end{bmatrix} 
+\sim 
+\textrm{MVNormal}
+\begin{pmatrix}
+\begin{bmatrix} 0 \\ 0  \end{bmatrix},
+\boldsymbol{\Omega}
+\end{pmatrix},
+$$
+$$
+\boldsymbol{\Omega} = 
+\begin{bmatrix}
+\sigma_{\alpha[B]} & 0\\
+0 & \sigma_{\alpha[C]}\\
+\end{bmatrix}
+\boldsymbol{R}
+\begin{bmatrix}
+\sigma_{\alpha[B]} & 0\\
+0 & \sigma_{\alpha[C]}\\
+\end{bmatrix},
+$$
+with priors also as in **Supplementary Material S3**, models 1 & 2.
+
+```{r}
+#| echo: false
+#| message: false
+#| output: false
+mod_corr <- readRDS(here("R_output", "model_corr.RDS"))
+```
+
+```{r}
+#| echo: false
+#| message: false
+#| output: false
+posterior_cor <- as_draws_df(mod_corr) |>
+  select(cor_SiteID__reflectscaled_Intercept__nematodesgenitalia_Intercept) |>
+  rename(cor = "cor_SiteID__reflectscaled_Intercept__nematodesgenitalia_Intercept")
+
+summarised_cor <- mean_qi(posterior_cor$cor)
+
+print_summarised_cor <- paste0(
+  sprintf("%.2f", round(summarised_cor$y, 2)),
+  " \\[",
+  sprintf("%.2f", round(summarised_cor$ymin, 2)),
+  ", ",
+  sprintf("%.2f", round(summarised_cor$ymax, 2)),
+  "\\]"
+)
+```
+
+Running this model gives an estimate for the among-sites correlation of `r print_summarised_cor`, which is not different from zero (**Fig. S5-1**). While this does not necessarily mean that the link we uncovered in the main text is primarily due to _within-population_ correlations (especially given the low number of sites with non-zero prevalence, **Supplementary Material S4**), it does suggest this may be the case.
+
+```{r}
+#| echo: false
+#| message: false
+#| output: false
+### a draft version of a code for a figure, ignored for now
+# mod_corr$data |>
+#  select(SiteID) |>
+#  distinct() |>
+#  mutate(sigma_reflect_scaled=1) |>
+#  add_epred_draws(mod_corr) |>
+#  group_by(.category,SiteID) |>
+#  mean_qi() |>
+#  select(SiteID,.category,starts_with(".epred")) |>
+#  pivot_wider(names_from=.category,values_from = c(".epred",".epred.lower",".epred.upper")) |>
+#  ggplot()+
+#  geom_point(
+#    data=mod_corr$data |>
+#      group_by(SiteID) |>
+#      summarise(mean_reflect=mean(reflect_scaled),mean_nemhelix=mean(nematodes_genitalia)),
+#    aes(mean_reflect,mean_nemhelix),
+#    col="grey")+
+#  geom_segment(
+#    aes(
+#      x=.epred_reflectscaled,
+#      xend=.epred_reflectscaled,
+#      y=.epred.lower_nematodesgenitalia,
+#      yend=.epred.upper_nematodesgenitalia
+#      ))+
+#  geom_segment(
+#    aes(
+#      x=.epred.lower_reflectscaled,
+#      xend=.epred.upper_reflectscaled,
+#      y=.epred_nematodesgenitalia,
+#      yend=.epred_nematodesgenitalia)
+#    )+
+#  geom_point(
+#    aes(
+#      .epred_reflectscaled,.epred_nematodesgenitalia),
+#    pch=21,fill="white",size=4)+
+#  scale_x_continuous("Reflectance (scaled, for now)")+
+#  scale_y_continuous("Nemhelix prevalence")+
+#  theme_bw()
+```
+
+
+```{r}
+#| echo: false
+#| message: false
+ggplot(posterior_cor) +
+  stat_halfeye(aes(x = cor), .width = c(0, 0.95)) +
+  geom_vline(xintercept = 0, lty = 2) +
+  scale_x_continuous("Among-sites correlation (posterior)", lim = c(-1, 1)) +
+  scale_y_continuous("") +
+  theme_bw() +
+  theme(axis.ticks.y = element_blank(), axis.text.y = element_blank())
+```
+
+
+**Figure S5-1.** <!--Left: site-level _Nemhelix bakeri_ and average shell reflectance. Grey dots are observed means (ignoring measurement uncertainty for prevalence), while white dots and segments are model predictions and their 95% credible intervals. Right: -->Posterior distribution of the site-level correlation between _N. bakeri_ prevalence and shell reflectance.
+
+
+# References

@@ -1,0 +1,120 @@
+---
+title: "Compiling parasite data into a unified occurence table"
+format: html
+editor_options: 
+  chunk_output_type: console
+---
+
+The goal here is to compile the information about the various parasites into a single occurence table
+
+```{r load-packages}
+library(tidyverse) # CRAN v2.0.0
+
+library(here) # CRAN v1.0.1
+```
+
+The challenge is that the quantity of information recorded varies depending on the parasite type. Some have exact numbers, some exact numbers split by size class, some have interval censored numbers because for larger numbers exact numbers were difficult to get (these have `N_low` and `N_high` columns), some have ordinal scales because they are difficult to count at any number (cercariae), some only occurrence already (e.g. sporocysts).
+
+Since most parasites have low prevalences in our dataset, abundance-based models would be hard to fit anyway, so we cut through that diversity by converting all values to occurrence only
+
+# Mites
+
+```{r mites}
+mites <- read_csv(here("data", "parasites", "mites.csv")) |>
+  mutate(has_mites = as.numeric(N_low > 0)) |>
+  select(SiteID, Species, SnailID, mites = has_mites)
+```
+
+# Trematodes, live infections
+
+```{r trematodes}
+cercariae <- read_csv(here("data", "parasites", "cercariae_ordinal.csv")) |>
+  mutate(has_cercariae = as.numeric(Cercariae_ordinal != "0")) |>
+  select(SiteID, Species, SnailID, cercariae = has_cercariae)
+
+metacercariae <- read_csv(here("data", "parasites", "metacercariae.csv")) |>
+  mutate(has_meta = as.numeric(N_low > 0)) |>
+  select(SiteID, Species, SnailID, metacercariae = has_meta)
+
+sporocysts <- read_csv(here("data", "parasites", "sporocysts_occurrence.csv")) |>
+  mutate(has_sporo = as.numeric((sporocysts_digestive_gland + sporocysts_lung + sporocysts_bw_body_and_shell + sporocysts_kidney) > 0)) |>
+  select(SiteID, Species, SnailID, sporocysts = has_sporo)
+```
+
+
+# Nematodes, live infections
+
+```{r nematodes}
+nematodes_intestine <- read_csv(here("data", "parasites", "nematodes_intestine.csv")) |>
+  mutate(total = N_below_1_mm + N_1_2_mm + N_2_4_mm + N_4_6_mm + N_6_10_mm + N_above_10_mm) |>
+  mutate(has_nem_intestine = as.numeric(total > 0)) |>
+  select(SiteID, Species, SnailID, nematodes_intestine = has_nem_intestine)
+
+nematodes_shell_body <- read_csv(here("data", "parasites", "nematodes_bw_shell_and_body.csv")) |>
+  mutate(total = N_below_1_mm + N_1_2_mm + N_2_4_mm + N_4_6_mm + N_6_10_mm + N_above_10_mm) |>
+  mutate(has_nem_shell_body = as.numeric(total > 0)) |>
+  select(SiteID, Species, SnailID, nematodes_bw_shell_body = has_nem_shell_body)
+
+nematodes_lung <- read_csv(here("data", "parasites", "nematodes_lung.csv")) |>
+  mutate(total = N_below_1_mm + N_1_2_mm + N_2_4_mm + N_4_6_mm + N_6_10_mm + N_above_10_mm) |>
+  mutate(has_nem_lung = as.numeric(total > 0)) |>
+  select(SiteID, Species, SnailID, nematodes_lung = has_nem_lung)
+
+nematodes_genitalia <- read_csv(here("data", "parasites", "nematodes_genitalia.csv")) |>
+  mutate(has_nem_gen = as.numeric(N_low > 0)) |>
+  select(SiteID, Species, SnailID, nematodes_genitalia = has_nem_gen)
+```
+
+# Infections, some notes for Methods
+
+```{r}
+read_csv(here("data", "parasites", "nematodes_intestine.csv")) |>
+  mutate(total = N_below_1_mm + N_1_2_mm + N_2_4_mm + N_4_6_mm + N_6_10_mm + N_above_10_mm) |>
+  filter(total > 0)
+
+a <- read_csv(here("data", "parasites", "nematodes_bw_shell_and_body.csv")) |>
+  mutate(total_a = N_below_1_mm + N_1_2_mm + N_2_4_mm + N_4_6_mm + N_6_10_mm + N_above_10_mm) |>
+  select(SnailID, total_a)
+
+read_csv(here("data", "parasites", "nematodes_lung.csv")) |>
+  mutate(total_b = N_below_1_mm + N_1_2_mm + N_2_4_mm + N_4_6_mm + N_6_10_mm + N_above_10_mm) |>
+  select(SnailID, total_b) |>
+  left_join(a) |>
+  mutate(full_total = total_b + total_a) |>
+  filter(full_total > 0) |>
+  summarise(Nsnail = sum(full_total > 0), Nnematodes = sum(full_total))
+```
+
+
+# Parasites trapped in shell
+
+(these will not be used in main analyses here, see Gerard et al 2023 https://doi.org/10.1051/parasite/2023001 for a study using them)
+
+```{r trapped}
+cercariae_trapped <- read_csv(here("data", "parasites", "cercariae_trapped.csv")) |>
+  mutate(has_cercariae_trapped = as.numeric(N_trapped > 0)) |>
+  select(SiteID, Species, SnailID, cercariae_trapped = has_cercariae_trapped)
+
+nematodes_trapped <- read_csv(here("data", "parasites", "nematodes_trapped.csv")) |>
+  mutate(has_nem_trapped = as.numeric(N_trapped > 0)) |>
+  select(SiteID, Species, SnailID, nematodes_trapped = has_nem_trapped)
+```
+
+# Making the combined dataset and exporting
+
+```{r combined-occurences}
+occurrence <- left_join(nematodes_lung, nematodes_shell_body) |>
+  left_join(nematodes_genitalia) |>
+  left_join(nematodes_intestine) |>
+  left_join(metacercariae) |>
+  left_join(sporocysts) |>
+  left_join(cercariae) |>
+  left_join(mites) |>
+  left_join(nematodes_trapped) |>
+  left_join(cercariae_trapped)
+```
+
+
+```{r export}
+write_csv(occurrence, here("data", "parasites", "combined_parasites_occurrence.csv"))
+```

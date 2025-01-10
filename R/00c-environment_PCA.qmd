@@ -1,0 +1,120 @@
+---
+title: "Exploring potential urbanization metrics"
+format: html
+editor_options: 
+  chunk_output_type: console
+---
+
+
+(a part of this makes up the Supplementary Material S1)
+
+The goal here is to examine how the different urbanization variables are correlated, to explain the decision to use only "distance to city centroid" in the final text
+
+```{r packages}
+library(FactoMineR) # CRAN v2.11
+library(sf) # CRAN v1.0-19
+library(tidyverse) # CRAN v2.0.0
+
+library(here) # CRAN v1.0.1
+```
+
+We start by loading the coordinates of the sites and of the Rennes urban area centroid (the latter taken from the GHSL UCDB)
+
+```{r load-gpkg}
+sites <- read_sf(here("data", "gpkg", "sites.gpkg"))
+centroid <- read_sf(here("data", "gpkg", "UCDB_centroid.gpkg")) |>
+  st_transform(st_crs(sites))
+```
+
+We then load the environmental variables, and filter to keep only sites where _Cornu aspersum_ were found. We then compute the distances to the urban centroid:
+
+```{r load-environment}
+# use snail dataset to create filter
+with_Cornu <- read_csv(here("data", "snail_phenotype", "snail_shell_size.csv")) |>
+  filter(Species == "Cornu_aspersum") |>
+  select(SiteID) |>
+  distinct()
+
+envt <- read_csv(here("data", "environment", "OCSGE_landcover.csv")) |>
+  mutate(has_Cornu = SiteID %in% with_Cornu$SiteID) |>
+  mutate(dist_urban = as.numeric(st_distance(sites, centroid)[, 1]))
+
+envt <- filter(envt, has_Cornu)
+```
+
+`envt` contains the following:
+
+- `SiteID`: unique site identifier
+
+- `builtup_X`: proportion covered by buildings (CS 1.1.1.1 in OCS-GE, see main text), with X the radius of the circular buffer, in m (from 100 to 1000) 
+
+- `anthropised_X`:proportion covered by all artificialized surfaces including buildings (CS 1.1 in OCS-GE), with X again the radius of the circular buffer
+
+- `has_Cornu`: used above to select sites where _Cornu aspersum_ were found
+
+- `dist_urban`: distance to the centroid of the Rennes urban area as defined in the GHSL UCDB <!--ref-->
+
+
+# Correlations
+
+## full correlation matrix
+
+```{r corrmatrix-full}
+corr_full <- envt |>
+  select(starts_with("anthropised"), starts_with("built")) |>
+  cor()
+
+mean(corr_full)
+range(corr_full)
+hist(corr_full)
+plot(ecdf(corr_full))
+```
+
+## between builtup variables only
+
+```{r corrmatrix-built}
+corr_built <- envt |>
+  select(starts_with("built")) |>
+  cor()
+
+mean(corr_built)
+range(corr_built)
+hist(corr_built)
+plot(ecdf(corr_built))
+```
+
+## between builtup variables only
+
+```{r corrmatrix-artificial}
+corr_artificial <- envt |>
+  select(starts_with("anthropised")) |>
+  cor()
+
+mean(corr_artificial)
+range(corr_artificial)
+hist(corr_artificial)
+plot(ecdf(corr_artificial))
+```
+
+Very strong correlations, nothing below 0.7 and most > 0.9. Attempting to disentangle them is probably a bit foolish. Let's check this with a PCA
+
+# a PCA of environmental variables
+
+(important: the PCA does **not** include "distance to urban centroid". The point is to look _a posteriori_ how the main axis of the PCA relates to distance)
+
+```{r pca}
+ACP <- PCA(envt |> select(-c(SiteID, dist_urban, has_Cornu)))
+
+dimdesc(ACP)
+```
+
+PC1 explains most of the variation, all variables are strongly correlated with it and not with any other...
+
+```{r corr_pca_dist}
+cor.test(envt$dist_urban, ACP$ind$coord[, 1])
+plot(envt$dist_urban, ACP$ind$coord[, 1])
+```
+
+... and the distance to urban centroid is also very strongly correlated with PC1, even though it was not included in it.
+
+**Take-home message**: probably not possible to disentangle the spatial scales and urbanisation metrics, best to just use distance to city centroid as single measure of urbanisation

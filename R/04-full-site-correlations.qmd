@@ -1,0 +1,122 @@
+---
+title: "A bivariate model connecting snail colour and Nemhelix infection"
+format: html
+editor_options: 
+  chunk_output_type: console
+---
+
+In the Discussion of the manuscript, we talk about how (i) snail colour is a predictor of infection by _Nemhelix_, (ii) both snail colour and _Nemhelix_ prevalence show strong between-population variation. Given (ii), we might wonder: is the link between colour and prevalence in (i) driven by within- or between-population differences?
+To partly* explore this, instead of a model with colour as a predictor of infection, let's build a hierarchical bivariate model with both as responses.
+
+(This code needs to be run, and its output saved in `R_output` before `supplementary.qmd` can be fully rendered to pdf)
+
+```{r load-packages}
+library(brms) # CRAN v2.22.0
+library(cmdstanr) # https://bbsbayes.r-universe.dev v0.8.0
+library(rptR) # CRAN v0.9.22
+library(sf) # CRAN v1.0-19
+library(tidyverse) # CRAN v2.0.0
+library(tidybayes) # CRAN v3.0.7
+
+library(here) # CRAN v1.0.1
+
+options(mc.cores = 4)
+```
+
+We first start by importing the raw datasets
+
+```{r import-raw}
+sites <- read_sf(here("data", "gpkg", "sites.gpkg"))
+
+centroid <- read_sf(here("data", "gpkg", "UCDB_centroid.gpkg")) |>
+  st_transform(st_crs(sites))
+
+snail_size <- read_csv(here("data", "snail_phenotype", "snail_shell_size.csv"))
+
+snail_colour <- read_csv(here("data", "snail_phenotype", "colour_cornu.csv"))
+
+parasites <- read_csv(here("data", "parasites", "combined_parasites_occurrence.csv")) |>
+  mutate(
+    other_nematodes = as.numeric((nematodes_lung + nematodes_bw_shell_body) > 0),
+    sporocerc = as.numeric((sporocysts + cercariae) > 0)
+  )
+```
+
+See previous code files for details.
+
+# Process data
+
+We create the "distance to urban centroid" variable, + export of the XY coordinates that will be useful for diagnostics of residual spatial autocorrelation:
+
+```{r distances-urban}
+sites$dist_urban <- as.numeric(st_distance(sites, centroid)[, 1])
+
+sites$coordX <- st_coordinates(sites)[, 1]
+sites$coordY <- st_coordinates(sites)[, 2]
+```
+
+
+```{r make-data1}
+tab_parasites <- parasites |>
+  left_join(snail_size) |>
+  left_join(snail_colour) |>
+  left_join(sites) |>
+  filter(Species == "Cornu_aspersum") |>
+  mutate(size = (diameter_mm_1 + diameter_mm_2) / 2)
+```
+
+```{r make-data2}
+tab_parasites$size_scaled <- scale(tab_parasites$size)[, 1]
+
+tab_parasites$reflect_scaled <- scale(tab_parasites$avg_reflectance)[, 1]
+tab_parasites$sigma_reflect_scaled <- tab_parasites$sigma_reflectance / sd(tab_parasites$avg_reflectance)
+```
+
+# A model to analyse the between-population correlation between Nemhelix and colour
+
+```{r model-formulas}
+bf_col2 <- bf(reflect_scaled | mi(sdy = sigma_reflect_scaled) ~ (1 | p | SiteID))
+bf_nemhelix2 <- bf(nematodes_genitalia ~ (1 | p | SiteID), family = bernoulli)
+```
+
+```{r model}
+if (file.exists(here("R_output", "model_corr.RDS")))
+# this if-else statement is avoid re-fitting a model when knitting qmd file if there is already one existing in R_output
+# to override, re-run the model and re-save manually by selecting relevant code lines then knit (or delete the RDS object)
+  {
+    mod_corr <- readRDS(here("R_output", "model_corr.RDS"))
+  } else {
+  mod_corr <- brm(mvbf(bf_col2, bf_nemhelix2, rescor = FALSE),
+    data = tab_parasites,
+    backend = "cmdstanr",
+    seed = 42,
+    iter = 6000, warmup = 3000,
+    prior = c(
+      set_prior("normal(0,1.5)",
+        class = "Intercept",
+        resp = c("nematodesgenitalia")
+      ),
+      set_prior("normal(0,1)",
+        class = "Intercept",
+        resp = c("reflectscaled")
+      ),
+      set_prior("normal(0,1)",
+        class = "sd",
+        resp = c("reflectscaled", "nematodesgenitalia")
+      ),
+      set_prior("normal(0,1)",
+        class = "sigma",
+        resp = c("reflectscaled")
+      ),
+      set_prior("lkj(2)", class = "cor")
+    ),
+    control = list(adapt_delta = 0.9)
+  )
+  saveRDS(mod_corr, file = here("R_output", "model_corr.RDS"))
+}
+```
+
+
+```{r check-model}
+summary(mod_corr)
+```

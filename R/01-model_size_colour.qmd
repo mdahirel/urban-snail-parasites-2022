@@ -1,0 +1,334 @@
+---
+title: "Modelling the effect of urbanisation on snail size and shell colour"
+format: html
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r load-packages}
+library(brms) # CRAN v2.22.0
+library(cmdstanr) # https://bbsbayes.r-universe.dev v0.8.0
+library(ncf) # CRAN v1.3-2
+library(patchwork) # CRAN v1.3.0
+library(rptR) # CRAN v0.9.22
+library(sf) # CRAN v1.0-19
+library(tidyverse) # CRAN v2.0.0
+library(tidybayes) # CRAN v3.0.7
+
+library(here) # CRAN v1.0.1
+
+options(mc.cores = 4)
+```
+
+We first start by importing the raw datasets:
+
+```{r import-raw}
+sites <- read_sf(here("data", "gpkg", "sites.gpkg"))
+
+centroid <- read_sf(here("data", "gpkg", "UCDB_centroid.gpkg")) |>
+  st_transform(st_crs(sites))
+
+snail_size <- read_csv(here("data", "snail_phenotype", "snail_shell_size.csv"))
+snail_colour <- read_csv(here("data", "snail_phenotype", "colour_cornu.csv"))
+```
+
+The `sites` geopackage contains the following data columns, in addition to site coordinates (`geom`):
+
+- `SiteID`: a site numbered ID
+
+- `name`: usually based on a street or a notable building near the site
+
+The `centroid` geopackage contains the coordinates of the centre of the Rennes urban area, _sensu_ the GHSL UCDB (see main text).
+
+The `snail_size` dataset contains the following columns:
+
+- `SiteID`: as in `sites`
+
+- `Species`: in the format [genus]_[species]. We only use data from *Cornu aspersum* in this study.
+
+- `SnailID`: unique snail ID, following a [`SiteID`][unique letter]_[first two letters of genus] format
+
+- `diameter_mm_1` and `diameter_mm_2`: two separate measurments of shell diameter.
+
+Finally, the `snail_colour` dataset was created by the `00a-colour_calibration` script and contains:
+
+- `SiteID`, `Species`, `SnailID`: as in previous  
+
+- `predict_[colour]`, `sigma_[colour]`: estimated value of reflectance in the [colour] channel, and its uncertainty. Predictions based on snail-specific calibration curves and their residual error
+
+- `cor_[colour]`: correlation coefficient associated with the calibration curve (correlation between observed and predicted values for the standard card)
+
+- `avg_reflectance` and `sigma_reflectance`: estimated reflectance averaged over the three RGB channels. The error in each channel is propagated to the average using methods in the `errors` package; see `00a-colour_calibration` script for details.
+
+# Process data
+
+We create the "distance to urban centroid" variable, and create explicit columns for the sites XY coordinates, that will be useful for diagnostics of residual spatial autocorrelation:
+
+```{r distances-urban}
+sites$dist_urban <- as.numeric(st_distance(sites, centroid)[, 1])
+
+sites$coordX <- st_coordinates(sites)[, 1]
+sites$coordY <- st_coordinates(sites)[, 2]
+```
+
+We then combine all files together
+
+```{r make-table}
+tab_size <- snail_size |>
+  filter(Species == "Cornu_aspersum") |> # we keep Cornu only here
+  left_join(sites) |>
+  left_join(snail_colour)
+
+table(snail_size$Species)
+dim(tab_size) # confirms the table has the correct # of snails
+```
+
+## how repeatable are size measurements?
+
+```{r plot-size}
+ggplot(tab_size) +
+  geom_point(aes(diameter_mm_1, diameter_mm_2))
+```
+
+It looks like it is **very** repeatable, let's check more
+
+```{r repeatability-size}
+size_long <- snail_size |>
+  filter(Species == "Cornu_aspersum") |>
+  select(SnailID, diameter_mm_1, diameter_mm_2) |>
+  pivot_longer(cols = -SnailID)
+
+size_repeatability <- rptGaussian(value ~ (1 | SnailID), grname = "SnailID", data = size_long, nboot = 0)
+
+size_repeatability
+```
+
+
+Size measurements are indeed **very** repeatable. For remaining analyses, let's create and use the average of the two measurements:
+
+```{r mean-size}
+tab_size$size <- (tab_size$diameter_mm_1 + tab_size$diameter_mm_2) / 2
+
+sigma(size_repeatability$mod)
+sigma(size_repeatability$mod)/mean(tab_size$size)
+```
+
+## a sidenote on different ways to estimate sigma
+
+```{r sidenote-sigma-size}
+sigma_size <- sd(c(tab_size$diameter_mm_1 - tab_size$size, tab_size$diameter_mm_2 - tab_size$size))
+
+tab_size$sigma_size <- sigma_size
+tab_size$sigma_size_predict <- sigma(size_repeatability$mod)
+tab_size$size_predict <- predict(size_repeatability$mod, newdata = tab_size)
+
+sigma_size
+sigma(size_repeatability$mod)
+## we note that the "manual estimate" of measurement error is smaller than the model based one
+## presumably this is due to shrinkage in the model based one
+## which leads predicted sizes to be slightly larger than observed in smaller than average snails
+## and conversely in larger than average snails
+ggplot(tab_size) +
+  geom_point(aes(size, size_predict)) +
+  geom_abline(intercept = 0, slope = 1) +
+  labs(
+    x = "observed size (mean of two measurements, mm)",
+    y = "LMM-predicted size"
+  )
+
+ggplot(tab_size) +
+  geom_point(aes(size, size_predict - size)) +
+  geom_vline(aes(xintercept = mean(size))) +
+  geom_hline(yintercept = 0) +
+  labs(
+    x = "observed size (mean of two measurements, mm)",
+    y = "LMM-predicted minus observed size"
+  )
+## the difference between the two is only really that visible because residual error is already so small
+## that shrinkage induced deviation are on the same order of magnitude
+```
+
+## scaling responses for Model
+
+```{r scaling-responses}
+tab_size$size_scaled <- scale(tab_size$size)[, 1]
+tab_size$sigma_size_scaled <- tab_size$sigma_size / sd(tab_size$size) # simply a unit change
+
+tab_size$reflect_scaled <- scale(tab_size$avg_reflectance)[, 1]
+tab_size$sigma_reflect_scaled <- tab_size$sigma_reflectance / sd(tab_size$avg_reflectance)
+```
+
+# Model
+
+In theory, we should use a Beta model for reflectance, since it is bounded between 0 and 100%, but reflectance values seem far enough from the bounds that a normal approx should be OK
+
+```{r check-boundaries}
+ggplot(tab_size) +
+  geom_pointrange(aes(x = 1, y = avg_reflectance, ymin = avg_reflectance - sigma_reflectance, ymax = avg_reflectance + sigma_reflectance), position = position_jitter(width = 0.5, height = 0)) +
+  coord_cartesian(ylim = c(0, 30)) +
+  labs(y = "average shell reflectance (+- estimation uncertainty)")
+```
+Using a Gaussian model comes with the benefit of enabling estimation of residual correlation with size, which corresponds here to within-patch between-individual correlation.
+
+```{r brm-formulas}
+### a model
+bf_size <- bf(size_scaled ~ scale(dist_urban) + (1 | p | SiteID))
+# alternative including uncertainty in size despite it being v small; will not change results
+# bf_size1 <- bf(size_scaled | mi(sdy = sigma_size_scaled) ~ scale(dist_urban) + (1 | p | SiteID))
+
+bf_col <- bf(reflect_scaled | mi(sdy = sigma_reflect_scaled) ~ scale(dist_urban) + (1 | p | SiteID))
+```
+
+
+```{r model}
+mod <- brm(mvbf(bf_size, bf_col, rescor = TRUE),
+  data = tab_size,
+  backend = "cmdstanr",
+  seed = 42,
+  iter = 6000, warmup = 3000,
+  prior = c(
+    set_prior("normal(0,1)", class = "Intercept", resp = c("sizescaled", "reflectscaled")),
+    set_prior("normal(0,1)", class = "b", resp = c("sizescaled", "reflectscaled")),
+    set_prior("normal(0,1)", class = "sd", resp = c("sizescaled", "reflectscaled")),
+    set_prior("normal(0,1)", class = "sigma", resp = c("sizescaled", "reflectscaled")),
+    set_prior("lkj(2)", class = "cor"),
+    set_prior("lkj(2)", class = "rescor")
+  ),
+  control = list(adapt_delta = 0.85)
+)
+
+summary(mod)
+```
+
+
+```{r pp-checks}
+pp_check(mod, resp = "reflectscaled", ndraws = 50) +
+  geom_vline(xintercept = (0 - mean(tab_size$avg_reflectance)) / sd(tab_size$avg_reflectance), linetype = 2, col = "red") +
+  coord_cartesian(xlim = c(-6, 6))
+# predictions are far from the 0% reflectance boundary, which is the red line
+
+pp_check(mod, resp = "sizescaled", ndraws = 50)
+
+## see also other pp_check diagnostics
+```
+
+
+```{r beta-model}
+## data distribution for reflectance is really far from boundary
+## you can run the below models to compare to the "correct" Beta model
+
+mod_reflect_beta1 <- brm(
+  bf(
+    avg_reflectance / 100 | mi(sdy = sigma_reflectance) ~ scale(dist_urban) + (1 | SiteID)
+  ),
+  data = tab_size,
+  family = Beta,
+  prior = c(
+    set_prior("normal(0,1.5)", class = "Intercept"),
+    set_prior("normal(0,1)", class = "b"),
+    set_prior("normal(0,1)", class = "sd")
+  ),
+  seed = 42,
+  backend = "cmdstanr"
+)
+## fails to converge correctly. What if we remove uncertainty?
+
+mod_reflect_beta2 <- brm(
+  bf(
+    avg_reflectance / 100 ~ scale(dist_urban) + (1 | SiteID)
+  ),
+  data = tab_size,
+  family = Beta,
+  prior = c(
+    set_prior("normal(0,1.5)", class = "Intercept"),
+    set_prior("normal(0,1)", class = "b"),
+    set_prior("normal(0,1)", class = "sd")
+  ),
+  seed = 42,
+  backend = "cmdstanr"
+)
+## converges
+summary(mod_reflect_beta2)
+pp_check(mod_reflect_beta2)
+## same qualitative conclusions as the gaussian model
+```
+
+Let's go back to the main model and look at whether there is residual spatial autocorrelation:
+
+```{r residual-autocor}
+residuals_size <- residuals(mod, resp = "sizescaled", re_formula = ~ (1 | SiteID), summary = TRUE)[, 1]
+residuals_col <- residuals(mod, resp = "reflectscaled", re_formula = ~ (1 | SiteID), summary = TRUE)[, 1]
+
+
+pp <- spline.correlog(
+  x = tab_size$coordX / 1000, y = tab_size$coordY / 1000,
+  z = residuals_size
+)
+
+plot(pp)
+
+pp <- spline.correlog(
+  x = tab_size$coordX / 1000, y = tab_size$coordY / 1000,
+  z = residuals_col
+)
+
+plot(pp)
+```
+
+# Get info for Table and Results
+
+```{r model-summary}
+summary(mod)
+```
+
+
+```{r bayes-r2}
+bayes_R2(mod, resp = "sizescaled", re_formula = NA)
+bayes_R2(mod, resp = "sizescaled")
+
+bayes_R2(mod, resp = "reflectscaled", re_formula = NA)
+bayes_R2(mod, resp = "reflectscaled")
+```
+
+
+# Plots
+
+
+```{r plot-size}
+sd_size <- sd(tab_size$size)
+mean_size <- mean(tab_size$size)
+
+fits_size <- tibble(dist_urban = (15:60) * 100) |>
+  add_epred_draws(mod, resp = "sizescaled", re_formula = NA) |>
+  mutate(.epred = .epred * sd_size + mean_size)
+
+p_size <- ggplot(tab_size) +
+  stat_lineribbon(data = fits_size, aes(dist_urban, .epred), fill = "grey", .width = 0.95) +
+  geom_point(aes(dist_urban, size), col = "grey40", alpha = 0.25) +
+  stat_pointinterval(aes(dist_urban, size, group = SiteID), .width = 0, point_size = 3) +
+  labs(x = "Distance to urban centroid (m)", y = "Shell size (mm)") +
+  theme_bw()
+```
+
+```{r plot-reflect}
+sd_reflect <- sd(tab_size$avg_reflectance)
+mean_reflect <- mean(tab_size$avg_reflectance)
+
+fits_reflect <- tibble(dist_urban = (15:60) * 100, sigma_reflect_scaled = mean(tab_size$sigma_reflect_scaled)) |>
+  add_epred_draws(mod, resp = "reflectscaled", re_formula = NA) |>
+  mutate(.epred = .epred * sd_reflect + mean_reflect)
+
+p_color <- ggplot(tab_size) +
+  stat_lineribbon(data = fits_reflect, aes(dist_urban, .epred), fill = "grey", .width = 0.95) +
+  geom_point(aes(dist_urban, avg_reflectance), col = "grey40", alpha = 0.25) +
+  stat_pointinterval(aes(dist_urban, avg_reflectance, group = SiteID), .width = 0, point_size = 3) +
+  labs(x = "Distance to urban centroid (m)", y = "Mean shell reflectance (%)") +
+  theme_bw() +
+  theme(legend.position = "none")
+```
+
+```{r plot}
+(p_size | p_color) + plot_layout(axes = "collect")
+
+ggsave(filename = here("R_output", "Fig2.pdf"), width = 8, height = 4)
+```

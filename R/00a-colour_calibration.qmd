@@ -1,0 +1,210 @@
+---
+title: "Getting calibrated estimates of shell reflectance from RGB values extracted from images"
+format: html
+editor_options: 
+  chunk_output_type: console
+---
+
+The goal here is to convert RGB values sampled on snail shell into standardised reflectance values. We use the RGB values collected on the grey standards placed in each photo to do so, following for that the general methodology suggested in Johnsen (2016) How to measure color using spectrometers and calibrated photographs. J. Exp. Biol. (DOI: 10.1242/jeb.124008)
+
+
+```{r load-packages}
+library(errors) # CRAN v0.4.2
+library(tidyverse) # CRAN v2.0.0
+
+library(here) # CRAN v1.0.1
+```
+
+```{r load-rawdata}
+data <- read_csv(here("data", "snail_phenotype", "raw_shell_colour_cornu.csv"))
+spectro <- read_csv(here("data", "snail_phenotype", "spectro_calibr.csv"))
+```
+
+`data` contains the following columns:
+
+- `Species`, `SiteID`, `SnailID`: species, site and individual IDs
+
+- `name`: either the name of the grey rectangle in the grey standard card where the RGB values were taken, or `snail` if it is the measurement on the snail shell
+
+- `Mean_Red`, `Mean_Green`, `Mean_Blue`: mean RGB values across the sampled region of interest
+
+- `StdDev_Red` and others: same as above, but SD instead of mean
+
+`spectro` contains the results of the spectrometer-based measures of reflectance for the grey standard card:
+
+- `name`: same as above, except with no `snail` values, obviously
+- `spectro`: spectrometry-based gray-scale reflectance. For each `name`, based on averaging 3 measures by card, and averaging the measures of 5 cards (see main text)
+
+# Split calibration and snail data
+
+We start by splitting `data` into grey card and snail measurements, joining `spectro` to the former, and nesting the rows by photograph:
+
+```{r split-data}
+data_obs <- filter(data, name == "snail") |>
+  group_by(SiteID, Species, SnailID) |>
+  nest(.key = "observation")
+
+data_calibration <- filter(data, name != "snail") |>
+  left_join(spectro) |>
+  group_by(SiteID, Species, SnailID) |>
+  nest(.key = "calibration")
+```
+
+# Make calibration model
+
+We then use `purr::map()` and `nls()` to fit a calibration model per photograph and per colour channel (using exponential curves as in Johnsen 2016 Fig. 4):
+
+
+```{r calibration-models}
+tab <- left_join(data_obs, data_calibration) |>
+  mutate(
+    modelred = map(
+      .x = calibration,
+      .f = function(.x) {
+        mod <- nls(spectro ~ a * exp(b * Mean_Red),
+          data = .x, start = list(a = 5, b = 0.01),
+          control = list(maxiter = 50)
+        )
+        return(mod)
+      }
+    ),
+    modelgreen = map(
+      .x = calibration,
+      .f = function(.x) {
+        mod <- nls(spectro ~ a * exp(b * Mean_Green),
+          data = .x, start = list(a = 5, b = 0.01),
+          control = list(maxiter = 50)
+        )
+        return(mod)
+      }
+    ),
+    modelblue = map(
+      .x = calibration,
+      .f = function(.x) {
+        mod <- nls(spectro ~ a * exp(b * Mean_Blue),
+          data = .x, start = list(a = 5, b = 0.01),
+          control = list(maxiter = 50)
+        )
+        return(mod)
+      }
+    )
+  )
+```
+
+Once the models are done, we also extract the correlation between expected and predicted values as a measure of model performance, and the residual SD as a measure of prediction uncertainty:
+
+```{r get-key-values}
+tab <- tab |>
+  mutate(
+    cor_red = map2(
+      .y = calibration, .x = modelred,
+      .f = function(.x, .y) {
+        cor(.y$spectro, fitted(.x))
+      }
+    ),
+    cor_green = map2(
+      .y = calibration, .x = modelgreen,
+      .f = function(.x, .y) {
+        cor(.y$spectro, fitted(.x))
+      }
+    ),
+    cor_blue = map2(
+      .y = calibration, .x = modelblue,
+      .f = function(.x, .y) {
+        cor(.y$spectro, fitted(.x))
+      }
+    )
+  ) |>
+  mutate(
+    sigma_red = map(
+      .x = modelred,
+      .f = ~ .x |> sigma()
+    ),
+    sigma_green = map(
+      .x = modelgreen,
+      .f = ~ .x |> sigma()
+    ),
+    sigma_blue = map(
+      .x = modelblue,
+      .f = ~ .x |> sigma()
+    )
+  )
+```
+
+# Estimate shell reflectance values
+
+Once we have the models, we can use them and the shell RGB values to predict reflectance values:
+
+```{r predict-rgb}
+tab <- tab |>
+  mutate(
+    predict_red = map2(
+      .y = observation, .x = modelred,
+      .f = function(.x, .y) {
+        predict(.x, newdata = .y)[1]
+      }
+    ),
+    predict_green = map2(
+      .y = observation, .x = modelgreen,
+      .f = function(.x, .y) {
+        predict(.x, newdata = .y)[1]
+      }
+    ),
+    predict_blue = map2(
+      .y = observation, .x = modelblue,
+      .f = function(.x, .y) {
+        predict(.x, newdata = .y)[1]
+      }
+    )
+  ) |>
+  unnest(cols = c(
+    predict_red, predict_green, predict_blue,
+    cor_red, cor_green, cor_blue,
+    sigma_red, sigma_green, sigma_blue
+  ))
+```
+
+We then average the predicted reflectances for the three channels, using the Taylor series method as implemented in the `errors` package to propagate uncertainty:
+
+```{r make-final-table}
+tab <- tab |>
+  ungroup() |>
+  select(
+    SiteID, Species, SnailID,
+    predict_red, predict_green, predict_blue,
+    sigma_red, sigma_green, sigma_blue,
+    cor_red, cor_green, cor_blue
+  ) |>
+  mutate(
+    predict_red = set_errors(predict_red, sigma_red),
+    predict_green = set_errors(predict_green, sigma_green),
+    predict_blue = set_errors(predict_blue, sigma_blue)
+  ) |>
+  mutate(avg_reflectance = (predict_red + predict_green + predict_blue) / set_errors(3, 0)) |>
+  mutate(sigma_reflectance = errors(avg_reflectance))
+```
+
+# Export final table
+
+```{r export-csv}
+write_csv(tab, here("data", "snail_phenotype", "colour_cornu.csv"))
+```
+
+# Addendum: Some useful statistics for Methods
+
+First, we collect here info about the distribution of the performances of the RGB calibration curves
+
+```{r performance-calibration-curves}
+mean(c(tab$cor_red, tab$cor_green, tab$cor_blue))
+range(c(tab$cor_red, tab$cor_green, tab$cor_blue))
+```
+
+Then, we collect the average relative uncertainty around the shell reflectance measurements (residual SD/ predicted reflectance), as well as its SD and range.
+
+This shows that the uncertainty is small(a) but non-negligible(b), so (a) our measurements are usable but (b) we need to account for uncertainty in our models using reflectance
+
+```{r reflectance-uncertainty}
+mean(tab$sigma_reflectance / as.numeric(tab$avg_reflectance))
+sd(tab$sigma_reflectance / as.numeric(tab$avg_reflectance))
+range(tab$sigma_reflectance / as.numeric(tab$avg_reflectance))
+```

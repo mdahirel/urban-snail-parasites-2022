@@ -1,0 +1,261 @@
+---
+title: "Modelling the effect of urbanisation and shell phenotype on parasite prevalence"
+format: html
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r load-packages}
+library(brms) # CRAN v2.22.0
+library(cmdstanr) # https://bbsbayes.r-universe.dev v0.8.0
+library(ggtext) # CRAN v0.1.2
+library(ncf) # CRAN v1.3-2
+library(patchwork) # CRAN v1.3.0
+library(rptR) # CRAN v0.9.22
+library(sf) # CRAN v1.0-19
+library(tidyverse) # CRAN v2.0.0
+library(tidybayes) # CRAN v3.0.7
+
+library(here) # CRAN v1.0.1
+
+options(mc.cores = 4)
+```
+
+We first start by importing the raw datasets
+
+```{r import-raw}
+sites <- read_sf(here("data", "gpkg", "sites.gpkg"))
+
+centroid <- read_sf(here("data", "gpkg", "UCDB_centroid.gpkg")) |>
+  st_transform(st_crs(sites))
+
+snail_size <- read_csv(here("data", "snail_phenotype", "snail_shell_size.csv"))
+
+snail_colour <- read_csv(here("data", "snail_phenotype", "colour_cornu.csv"))
+
+parasites <- read_csv(here("data", "parasites", "combined_parasites_occurrence.csv")) |>
+  mutate(
+    other_nematodes = as.numeric((nematodes_lung + nematodes_bw_shell_body) > 0),
+    sporocerc = as.numeric((sporocysts + cercariae) > 0)
+  )
+```
+
+(For the description of the columns in `sites`,`centroid`, `snail_size` and `snail_colour`, see the `01-model_size_colour` script)
+
+The `parasites` dataset contains the following columns:
+
+- `SiteID`: a site numbered ID
+- `Species`: in the format [genus]_[species]. We only use data from *Cornu aspersum* in this study.
+- `SnailID`: unique snail ID, following a [`SiteID`][unique letter]_[first two letters of genus] format
+- `nematodes_lung`: (0/1) whether nematodes were found in the snail's lung (multiple potential taxa)         
+- `nematodes_bw_shell_body` : (0/1) whether nematodes were found between the snail's shell and its body (multiple potential taxa)      
+- `nematodes_genitalia`: (0/1) whether nematodes were found in the snail's genitalia. We identified these as _Nemhelix bakeri_   
+- `nematodes_intestine` : (0/1) whether nematodes were found in the snail's intestine (multiple potential taxa)    
+- `metacercariae`, `sporocysts` and `cercariae`: (0/1) whether these various trematode larval stages were found in the snail (multiple potential taxa, overwhelmingly _Brachylaima_ sp.)    
+- `mites`   : (0/1) whether _Riccardoella_ mites were found
+- `nematodes_trapped` and `cercariae_trapped`: whether trematodes or nematodes were found trapped in the shell. There are not used in this study; see Gérard et al. 2023 (doi:10.1051/parasite/2023001): to see them used.
+
+- `sporocerc`: (0/1) Sporocysts and/or cercariae detected. Cercariae are emitted by sporocysts _en masse_ and then leave their host to infect another snail, where they'll become metacercariae. In one individual, we recorded large numbers of cercariae but no sporocysts:
+
+```{r sporocerc}
+table(paste("has cercariae?", parasites$cercariae == 1), paste("has sporocysts?", parasites$sporocysts == 1))
+
+parasites |>
+  filter(cercariae == 1 & sporocysts == 0)
+## individual with SnailID 6L_Co
+## looking at the raw parasite files (see 00b-make_occurrence) show it had 50-99 cercariae
+```
+
+Given what we know about trematode life cycles, it is extremely unlikely that this many cercariae entered this one snail in search of a new host. It is much, much more likely that this snail harboured sporocysts that were not detected, and that these emitted the cercariae. We therefore used `sporocerc` as synonymous with sporocysts for analyses. 
+
+`other_nematodes`: (0/1) whether `nematodes_bw_shell_body` or `nematodes_lung` is non-zero. We exclude `nematodes_intestine` as only one was found, and we were unable to exclude it was merely endophoretic (Sudhaus 2018, doi:10.25674/4jp6-0v30)       
+
+# Process data
+
+We create the "distance to urban centroid" variable, and create explicit columns for the sites XY coordinates, that will be useful for diagnostics of residual spatial autocorrelation:
+
+```{r distances-urban}
+sites$dist_urban <- as.numeric(st_distance(sites, centroid)[, 1])
+
+sites$coordX <- st_coordinates(sites)[, 1]
+sites$coordY <- st_coordinates(sites)[, 2]
+```
+
+
+```{r make-table}
+tab_parasites <- parasites |>
+  left_join(snail_size) |>
+  left_join(snail_colour) |>
+  left_join(sites) |>
+  filter(Species == "Cornu_aspersum") |>
+  mutate(size = (diameter_mm_1 + diameter_mm_2) / 2)
+```
+
+```{r scaling-predictors}
+tab_parasites$size_scaled <- scale(tab_parasites$size)[, 1]
+tab_parasites$reflect_scaled <- scale(tab_parasites$avg_reflectance)[, 1]
+tab_parasites$sigma_reflect_scaled <- tab_parasites$sigma_reflectance / sd(tab_parasites$avg_reflectance)
+
+sd_size <- sd(tab_parasites$size)
+mean_size <- mean(tab_parasites$size)
+sd_reflect <- sd(tab_parasites$avg_reflectance)
+mean_reflect <- mean(tab_parasites$avg_reflectance)
+```
+
+# The model
+
+```{r brm-formulas}
+bf_nemhelix <- bf(
+  nematodes_genitalia ~
+    size_scaled +
+    me(reflect_scaled, sigma_reflect_scaled) +
+    scale(dist_urban) +
+    (1 | p | SiteID),
+  family = bernoulli
+)
+
+bf_nema_other <- bf(
+  other_nematodes ~
+    size_scaled +
+    me(reflect_scaled, sigma_reflect_scaled) +
+    scale(dist_urban) +
+    (1 | p | SiteID),
+  family = bernoulli
+)
+
+bf_meta <- bf(
+  metacercariae ~
+    size_scaled +
+    me(reflect_scaled, sigma_reflect_scaled) +
+    scale(dist_urban) +
+    (1 | p | SiteID),
+  family = bernoulli
+)
+
+bf_sporocerc <- bf(
+  sporocerc ~
+    size_scaled +
+    me(reflect_scaled, sigma_reflect_scaled) +
+    scale(dist_urban) +
+    (1 | p | SiteID),
+  family = bernoulli
+)
+```
+
+
+```{r model}
+mod <- brm(mvbf(bf_nemhelix, bf_nema_other, bf_meta, bf_sporocerc, rescor = FALSE),
+  data = tab_parasites,
+  backend = "cmdstanr",
+  seed = 42,
+  iter = 6000, warmup = 3000,
+  save_pars = save_pars(group = TRUE, latent = TRUE),
+  prior = c(
+    set_prior("normal(0,1.5)",
+      class = "Intercept",
+      resp = c("nematodesgenitalia", "othernematodes", "metacercariae", "sporocerc")
+    ),
+    set_prior("normal(0,1)",
+      class = "b",
+      resp = c("nematodesgenitalia", "othernematodes", "metacercariae", "sporocerc")
+    ),
+    set_prior("normal(0,1)",
+      class = "sd",
+      resp = c("nematodesgenitalia", "othernematodes", "metacercariae", "sporocerc")
+    ),
+    ## using an exponential(1) prior for the SDs doesn't change anything
+    set_prior("lkj(2)", class = "cor")
+  )
+)
+```
+
+An *example* of posterior predictive checks:
+
+```{r pp-checks}
+pp_check(mod, resp = "metacercariae", "bars_grouped", group = "SiteID", ndraws = 1000)
+```
+
+We again check the residual spatial autocorrelation (an example, all four parasites similar):
+
+```{r residual-autocor}
+residuals_meta <- residuals(mod,
+  resp = "metacercariae", re_formula = ~ (1 | SiteID), # type="pearson",
+  summary = TRUE
+)[, 1]
+pp <- spline.correlog(
+  x = tab_parasites$coordX / 1000, y = tab_parasites$coordY / 1000,
+  z = residuals_meta
+)
+
+plot(pp)
+```
+
+# Get info for Table and Results
+
+```{r model-summary}
+summary(mod)
+```
+
+```{r bayes-R2}
+bayes_R2(mod, resp = "nematodesgenitalia", re_formula = NA)
+bayes_R2(mod, resp = "nematodesgenitalia")
+
+bayes_R2(mod, resp = "othernematodes", re_formula = NA)
+bayes_R2(mod, resp = "othernematodes")
+
+bayes_R2(mod, resp = "sporocerc", re_formula = NA)
+bayes_R2(mod, resp = "sporocerc")
+
+bayes_R2(mod, resp = "metacercariae", re_formula = NA)
+bayes_R2(mod, resp = "metacercariae")
+```
+
+# Plots
+
+The model summary shows only two obvious predictor-parasite relationships, so we only plot these two:
+
+```{r plot meta-size}
+fits_meta <- tibble(
+  size = c(255:410) / 10,
+  dist_urban = mean(tab_parasites$dist_urban),
+  reflect_scaled = 0,
+  sigma_reflect_scaled = mean(tab_parasites$sigma_reflect_scaled)
+) |>
+  mutate(size_scaled = (size - mean_size) / sd_size) |>
+  add_epred_draws(mod, resp = "metacercariae", re_formula = NA) |>
+  ungroup()
+
+p_meta <- ggplot(tab_parasites) +
+  stat_lineribbon(data = fits_meta, aes(size, .epred), fill = "grey", .width = 0.95) +
+  geom_point(aes(size, metacercariae), col = "grey40", alpha = 0.25) +
+  labs(x = "Shell size (mm)", y = "Probability of infection by metacercariae") +
+  theme_bw()
+p_meta
+```
+
+```{r plot-nemhelix-colour}
+fits_nemhelix <- tibble(
+  avg_reflectance = c(90:230) / 10,
+  dist_urban = mean(tab_parasites$dist_urban),
+  size_scaled = 0,
+  sigma_reflect_scaled = mean(tab_parasites$sigma_reflect_scaled)
+) |>
+  mutate(reflect_scaled = (avg_reflectance - mean_reflect) / sd_reflect) |>
+  add_epred_draws(mod, resp = "nematodesgenitalia", re_formula = NA)
+
+p_nemhelix <- ggplot(tab_parasites) +
+  stat_lineribbon(data = fits_nemhelix, aes(avg_reflectance, .epred), fill = "grey", .width = 0.95) +
+  geom_point(aes(avg_reflectance, metacercariae), col = "grey40", alpha = 0.25) +
+  labs(x = "Shell reflectance (%)", y = "Probability of infection by _Nemhelix bakeri_") +
+  theme_bw() +
+  theme(axis.title.y = element_markdown())
+p_nemhelix
+```
+
+
+```{r plot}
+(p_meta | p_nemhelix)
+
+ggsave(filename = here("R_output", "Fig3.pdf"), width = 8, height = 4)
+```

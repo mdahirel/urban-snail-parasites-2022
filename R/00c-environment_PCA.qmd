@@ -11,11 +11,11 @@ editor_options:
 The goal here is to examine how the different urbanization variables are correlated, to explain the decision to use only "distance to city centroid" in the final text
 
 ```{r packages}
-library(FactoMineR) # CRAN v2.11
-library(sf) # CRAN v1.0-19
-library(tidyverse) # CRAN v2.0.0
+library(FactoMineR) # CRAN v2.11 
+library(sf)         # CRAN v1.0-20 
+library(tidyverse)  # CRAN v2.0.0 
 
-library(here) # CRAN v1.0.1
+library(here)       # CRAN v1.0.1 
 ```
 
 We start by loading the coordinates of the sites and of the Rennes urban area centroid (the latter taken from the GHSL UCDB)

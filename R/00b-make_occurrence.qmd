@@ -8,9 +8,9 @@ editor_options:
 The goal here is to compile the information about the various parasites into a single occurence table
 
 ```{r load-packages}
-library(tidyverse) # CRAN v2.0.0
+library(tidyverse) # CRAN v2.0.0 
 
-library(here) # CRAN v1.0.1
+library(here)      # CRAN v1.0.1 
 ```
 
 The challenge is that the quantity of information recorded varies depending on the parasite type. Some have exact numbers, some exact numbers split by size class, some have interval censored numbers because for larger numbers exact numbers were difficult to get (these have `N_low` and `N_high` columns), some have ordinal scales because they are difficult to count at any number (cercariae), some only occurrence already (e.g. sporocysts).

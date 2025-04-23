@@ -9,10 +9,10 @@ The goal here is to convert RGB values sampled on snail shell into standardised 
 
 
 ```{r load-packages}
-library(errors) # CRAN v0.4.2
+library(errors)    # CRAN v0.4.3
 library(tidyverse) # CRAN v2.0.0
 
-library(here) # CRAN v1.0.1
+library(here)      # CRAN v1.0.1
 ```
 
 ```{r load-rawdata}

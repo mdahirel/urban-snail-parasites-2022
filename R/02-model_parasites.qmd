@@ -227,8 +227,8 @@ fits_meta <- tibble(
   ungroup()
 
 p_meta <- ggplot(tab_parasites) +
-  stat_lineribbon(data = fits_meta, aes(size, .epred), fill = "grey", .width = 0.95) +
-  geom_point(aes(size, metacercariae), col = "grey40", alpha = 0.25) +
+  stat_lineribbon(data = fits_meta, aes(size, .epred), fill = "#9ebcda", .width = 0.95) +
+  geom_point(aes(size, metacercariae), col = "#8c96c6", alpha = 0.25) +
   labs(x = "Shell size (mm)", y = "Probability of infection by metacercariae") +
   theme_bw()
 p_meta
@@ -245,8 +245,8 @@ fits_nemhelix <- tibble(
   add_epred_draws(mod, resp = "nematodesgenitalia", re_formula = NA)
 
 p_nemhelix <- ggplot(tab_parasites) +
-  stat_lineribbon(data = fits_nemhelix, aes(avg_reflectance, .epred), fill = "grey", .width = 0.95) +
-  geom_point(aes(avg_reflectance, metacercariae), col = "grey40", alpha = 0.25) +
+  stat_lineribbon(data = fits_nemhelix, aes(avg_reflectance, .epred), fill = "#9ebcda", .width = 0.95) +
+  geom_point(aes(avg_reflectance, metacercariae), col = "#8c96c6", alpha = 0.25) +
   labs(x = "Shell reflectance (%)", y = "Probability of infection by _Nemhelix bakeri_") +
   theme_bw() +
   theme(axis.title.y = element_markdown())

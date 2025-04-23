@@ -6,16 +6,16 @@ editor_options:
 ---
 
 ```{r load-packages}
-library(brms)      # CRAN v2.22.0 
-library(cmdstanr) # https://stan-dev.r-universe.dev v0.9.0 
-library(ncf)       # CRAN v1.3-2 
-library(patchwork) # CRAN v1.3.0 
-library(rptR)      # CRAN v0.9.22 
-library(sf)        # CRAN v1.0-20 
-library(tidyverse) # CRAN v2.0.0 
-library(tidybayes) # CRAN v3.0.7 
+library(brms) # CRAN v2.22.0
+library(cmdstanr) # https://stan-dev.r-universe.dev v0.9.0
+library(ncf) # CRAN v1.3-2
+library(patchwork) # CRAN v1.3.0
+library(rptR) # CRAN v0.9.22
+library(sf) # CRAN v1.0-20
+library(tidyverse) # CRAN v2.0.0
+library(tidybayes) # CRAN v3.0.7
 
-library(here)      # CRAN v1.0.1 
+library(here) # CRAN v1.0.1
 
 options(mc.cores = 4)
 ```
@@ -110,7 +110,7 @@ Size measurements are indeed **very** repeatable. For remaining analyses, let's 
 tab_size$size <- (tab_size$diameter_mm_1 + tab_size$diameter_mm_2) / 2
 
 sigma(size_repeatability$mod)
-sigma(size_repeatability$mod)/mean(tab_size$size)
+sigma(size_repeatability$mod) / mean(tab_size$size)
 ```
 
 ## a sidenote on different ways to estimate sigma
@@ -181,21 +181,29 @@ bf_col <- bf(reflect_scaled | mi(sdy = sigma_reflect_scaled) ~ scale(dist_urban)
 
 
 ```{r model}
-mod <- brm(mvbf(bf_size, bf_col, rescor = TRUE),
-  data = tab_size,
-  backend = "cmdstanr",
-  seed = 42,
-  iter = 6000, warmup = 3000,
-  prior = c(
-    set_prior("normal(0,1)", class = "Intercept", resp = c("sizescaled", "reflectscaled")),
-    set_prior("normal(0,1)", class = "b", resp = c("sizescaled", "reflectscaled")),
-    set_prior("normal(0,1)", class = "sd", resp = c("sizescaled", "reflectscaled")),
-    set_prior("normal(0,1)", class = "sigma", resp = c("sizescaled", "reflectscaled")),
-    set_prior("lkj(2)", class = "cor"),
-    set_prior("lkj(2)", class = "rescor")
-  ),
-  control = list(adapt_delta = 0.85)
-)
+if (file.exists(here("R_output", "model_shell.RDS")))
+# this if-else statement is avoid re-fitting a model when knitting Rmd file if there is already one existing in R_output
+# to override, re-run the model and re-save manually by selecting relevant code lines then knit (or delete the RDS object)
+  {
+    mod <- readRDS(here("R_output", "model_shell.RDS"))
+  } else {
+  mod <- brm(mvbf(bf_size, bf_col, rescor = TRUE),
+    data = tab_size,
+    backend = "cmdstanr",
+    seed = 42,
+    iter = 6000, warmup = 3000,
+    prior = c(
+      set_prior("normal(0,1)", class = "Intercept", resp = c("sizescaled", "reflectscaled")),
+      set_prior("normal(0,1)", class = "b", resp = c("sizescaled", "reflectscaled")),
+      set_prior("normal(0,1)", class = "sd", resp = c("sizescaled", "reflectscaled")),
+      set_prior("normal(0,1)", class = "sigma", resp = c("sizescaled", "reflectscaled")),
+      set_prior("lkj(2)", class = "cor"),
+      set_prior("lkj(2)", class = "rescor")
+    ),
+    control = list(adapt_delta = 0.85)
+  )
+  saveRDS(mod, file = here("R_output", "model_shell.RDS"))
+}
 
 summary(mod)
 ```
@@ -212,7 +220,7 @@ pp_check(mod, resp = "sizescaled", ndraws = 50)
 ## see also other pp_check diagnostics
 ```
 
-
+(Let's nonetheless have a look at what the reflectance model would look with a Beta distribution:)
 ```{r beta-model}
 ## data distribution for reflectance is really far from boundary
 ## you can run the below models to compare to the "correct" Beta model

@@ -7,17 +7,17 @@ editor_options:
 
 
 ```{r load-packages}
-library(brms)      # CRAN v2.22.0 
-library(cmdstanr) # https://stan-dev.r-universe.dev v0.9.0 
-library(ggtext)    # CRAN v0.1.2 
-library(ncf)       # CRAN v1.3-2 
-library(patchwork) # CRAN v1.3.0 
-library(rptR)      # CRAN v0.9.22 
-library(sf)        # CRAN v1.0-20 
-library(tidyverse) # CRAN v2.0.0 
-library(tidybayes) # CRAN v3.0.7 
+library(brms) # CRAN v2.22.0
+library(cmdstanr) # https://stan-dev.r-universe.dev v0.9.0
+library(ggtext) # CRAN v0.1.2
+library(ncf) # CRAN v1.3-2
+library(patchwork) # CRAN v1.3.0
+library(rptR) # CRAN v0.9.22
+library(sf) # CRAN v1.0-20
+library(tidyverse) # CRAN v2.0.0
+library(tidybayes) # CRAN v3.0.7
 
-library(here)      # CRAN v1.0.1 
+library(here) # CRAN v1.0.1
 
 options(mc.cores = 4)
 ```
@@ -134,29 +134,57 @@ table(is.na(tab_behav$food))
 table(tab_behav$food > 0)
 ```
 
-Given the limited number of these values and the measurement uncertainty, we'll modify them so that they are instead at a low value = to the measurement detection threshold. Alternatively we could have attempted to use censoring in model, but as of writing, there are issues with correctly including censoring and missing values for non-gaussian models
+Given the limited number of these values and the fact they may be due to measurement uncertainty/ detection threshold issues, we can deal with them using a transformation:
+
+$p^* = (p (n-1) + 0.5 )/n$ where $p$ is the original **proportion**, $p^*$ the transformed proportion and $n$ the total number of observations (we do not include the missing observations to be imputed by the model in that number, but results do not change meaningfully if we do). This transformation can be traced back to Smithson & Verkuilen (2006) (DOI: 10.1037/1082-989X.11.1.54), but while the article is still accessible, the Supplementary Material where the transformation is actually mentioned is lost to link rot (it is sadly not mentioned at all in the main text, which only says "in practice, this transformation usually needs to be modified slightly to avoid zeros and ones in the data (this issue is discussed in the supplementary material referred to in Footnote 2)"). For a citation that actually mention the transformation in the main text, one can use Douma & Weedon (2019) (DOI: 10.1111/2041-210X.13234) (they credit the original source).
+
+Alternatively we could have attempted to use censoring in model (treating 0s as left-censored values set at the detection threshold), but as of writing, there are issues with correctly including both censoring and missing values for non-gaussian models
+
+```{r betavar-transform}
+SV2006 <- function(p, n) {
+  pstar <- (p * (n - 1) + 0.5) / n
+  return(pstar)
+}
+
+# we'll need a back transformation to convert predictions back to original scale
+inverse_SV2006 <- function(pstar, n) {
+  p <- (pstar * n - 0.5) / (n - 1)
+  return(p)
+}
+```
+
 
 ```{r food-check2}
-tab_behav$food2 <- case_when(
-  tab_behav$food == 0 ~ 0.01,
-  T ~ tab_behav$food
-)
+nobs_food <- sum(!is.na(tab_behav$food))
 
-# reminder: we'll need to divide by two to get values to the Beta 0-1 interval in the model, because 2g of food were given
+tab_behav$food_transformed <- SV2006(tab_behav$food / 2, nobs_food)
+
+plot(tab_behav$food / 2, tab_behav$food_transformed)
+abline(0, 1)
+plot(tab_behav$food / 2, tab_behav$food_transformed - tab_behav$food / 2)
+abline(h = 0)
+
+# check that the backtransformation works correctly
+plot(
+  tab_behav$food / 2,
+  inverse_SV2006(tab_behav$food_transformed, nobs_food) - tab_behav$food / 2
+)
+abline(h = 0)
+# it works (remaining deviations from 0 are floating point errors, see scale on y-axis)
 ```
 
 # The model
 
 ```{r brm-formulas}
 bf_food <- bf(
-  food2/2 | mi() ~
+  food_transformed | mi() ~
     size_scaled +
     me(reflect_scaled, sigma_reflect_scaled) +
     scale(dist_urban) +
     nematodes_genitalia + other_nematodes + metacercariae + sporocerc +
     (1 | p | SiteID) + (1 | q | SnailID),
-  nlf(phi ~ 1 / invphi),
-  lf(invphi ~ 1),
+  nlf(phi ~ phi2+2), # in this and corresponding prior choice, we follow McElreath 2020 (p371)
+  lf(phi2 ~ 1),
   family = Beta(link = "logit", link_phi = "identity")
 )
 
@@ -169,47 +197,93 @@ bf_speed <- bf(
     (1 | p | SiteID) + (1 | q | SnailID),
   family = weibull
 )
-# weibull on speed has better pp_check properties than gamma or lognormal (not perfect, but way better)
+# preliminary checks shows that here, weibull on speed has better pp_check properties than gamma or lognormal (not perfect, but way better)
 ```
 
 
 ```{r model}
-mod <- brm(mvbf(bf_food, bf_speed, rescor = FALSE),
-  data = tab_behav,
-  backend = "cmdstanr",
-  seed = 42,
-  iter = 6000, warmup = 3000, control = list(adapt_delta = 0.9),
-  save_pars = save_pars(group = TRUE, latent = TRUE),
-  prior = c(
-    set_prior("normal(0,1.5)", class = "Intercept", resp = "food22"),
-    set_prior("normal(0,1)", class = "Intercept", resp = "speed"),
-    set_prior("normal(0,1)", class = "b", resp = c("speed", "food22")),
-    set_prior("normal(0,1)", class = "sd", resp = c("speed", "food22")),
-    set_prior("exponential(1)", class = "shape", resp = "speed"),
-    set_prior("exponential(1)", nlpar = "invphi", resp = "food22", class = "b", lb = 0),
-    set_prior("lkj(2)", class = "cor")
+if (file.exists(here("R_output", "model_behaviour.RDS")))
+# this if-else statement is avoid re-fitting a model when knitting Rmd file if there is already one existing in R_output
+# to override, re-run the model and re-save manually by selecting relevant code lines then knit (or delete the RDS object)
+  {
+    mod <- readRDS(here("R_output", "model_behaviour.RDS"))
+  } else {
+  mod <- brm(mvbf(bf_food, bf_speed, rescor = FALSE),
+    data = tab_behav,
+    backend = "cmdstanr",
+    seed = 42,
+    iter = 6000, warmup = 3000, control = list(adapt_delta = 0.9),
+    save_pars = save_pars(group = TRUE, latent = TRUE),
+    prior = c(
+      set_prior("normal(0,1.5)", class = "Intercept", resp = "foodtransformed"),
+      set_prior("normal(0,1)", class = "Intercept", resp = "speed"),
+      set_prior("normal(0,1)", class = "b", resp = c("speed", "foodtransformed")),
+      set_prior("normal(0,1)", class = "sd", resp = c("speed", "foodtransformed")),
+      set_prior("exponential(1)", class = "shape", resp = "speed"),
+      set_prior("exponential(1)", nlpar = "phi2", resp = "foodtransformed", class = "b", lb = 0),
+      set_prior("lkj(2)", class = "cor")
+    )
   )
-)
+
+  saveRDS(mod, file = here("R_output", "model_behaviour.RDS"))
+}
+
+summary(mod)
 ```
 
 It's a little trickier to get pp_checks using the ready-made function from brms with missing data imputed using `mi()`, so we'll have to go directly to the underlying functions brms use
 
 ```{r ppchecks}
-fit <- posterior_predict(mod, resp = "speed", newdata = filter(tab_behav, !is.na(speed)))
+ppfitspeed <- posterior_predict(mod, resp = "speed", newdata = filter(tab_behav, !is.na(speed)))
+
+bayesplot::ppc_dens_overlay(
+  y = filter(tab_behav, !is.na(speed))$speed,
+  yrep = ppfitspeed[1:50, ]
+)
 
 bayesplot::ppc_dens_overlay_grouped(
   y = filter(tab_behav, !is.na(speed))$speed,
-  yrep = fit[1:50, ],
+  yrep = ppfitspeed[1:50, ],
   group = filter(tab_behav, !is.na(speed))$SiteID
 )
 
-fit <- posterior_predict(mod, resp = "food22", newdata = filter(tab_behav, !is.na(food2))) * 2
+bayesplot::ppc_pit_ecdf(
+  y = filter(tab_behav, !is.na(speed))$speed,
+  yrep = ppfitspeed,
+  prob = 0.95, plot_diff = TRUE
+)
+## slightly off, but still good enough
+
+ppfitfood <- posterior_predict(mod, resp = "foodtransformed", newdata = filter(tab_behav, !is.na(food_transformed)))
+
+bayesplot::ppc_dens_overlay(
+  y = filter(tab_behav, !is.na(food_transformed))$food_transformed,
+  yrep = ppfitfood[1:50, ]
+)
 
 bayesplot::ppc_dens_overlay_grouped(
-  y = filter(tab_behav, !is.na(food2))$food2,
-  yrep = fit[1:50, ],
-  group = filter(tab_behav, !is.na(food2))$SiteID
+  y = filter(tab_behav, !is.na(food_transformed))$food_transformed,
+  yrep = ppfitfood[1:50, ],
+  group = filter(tab_behav, !is.na(food_transformed))$SiteID
 )
+
+bayesplot::ppc_pit_ecdf(
+  y = filter(tab_behav, !is.na(food_transformed))$food_transformed,
+  yrep = ppfitfood,
+  prob = 0.95, plot_diff = TRUE
+)
+
+## the pit ecdf plot is off for food
+## in a way that may suggest overdispersion
+## however, changing prior to favour lower values of precision parameter does not change posterior
+## so not obviously due to prior
+## + not any obvious misspecification signal from the dens_overlay_grouped plot
+## (not shown) tried as solution, to set variable precision parameters per Site 
+## (random effect of site, doubly hierarchical model)
+## but no change to pit ecdf issues
+## as there are no further obvious options to change model (e.g. no predictor to add, no obviously valid transformation)
+## decision: use model as is
+
 
 # newdata because otherwise fails with mi()
 ```
@@ -218,27 +292,27 @@ We again check the residual spatial autocorrelation:
 
 ```{r residual-autocor}
 residuals_food <- residuals(mod,
-  resp = "food22", re_formula = ~ (1 | SiteID/SnailID), # type="pearson",
+  resp = "foodtransformed", re_formula = ~ (1 | SiteID / SnailID), # type="pearson",
   summary = TRUE
 )[, 1]
 
 pp <- spline.correlog(
   x = tab_behav$coordX / 1000, y = tab_behav$coordY / 1000,
   z = residuals_food,
-  na.rm=TRUE
+  na.rm = TRUE
 )
 
 plot(pp)
 
 residuals_speed <- residuals(mod,
-  resp = "speed", re_formula = ~ (1 | SiteID/SnailID), # type="pearson",
+  resp = "speed", re_formula = ~ (1 | SiteID / SnailID), # type="pearson",
   summary = TRUE
 )[, 1]
 
 pp <- spline.correlog(
   x = tab_behav$coordX / 1000, y = tab_behav$coordY / 1000,
   z = residuals_speed,
-  na.rm=TRUE
+  na.rm = TRUE
 )
 
 plot(pp)
@@ -248,9 +322,7 @@ plot(pp)
 
 ```{r summary}
 summary(mod)
-
-# summary has 1/phi, get phi on the precision scale back:
-posterior_epred(mod, newdata = tab_behav[1, ], resp = "food22", dpar = "phi") |> mean_qi()
+# !!! IMPORTANT don't forget to add +2 back to phi2 to get correct phi back (see model formula above)
 ```
 
 ```{r bayes-R2}
@@ -258,8 +330,8 @@ bayes_R2(mod, resp = "speed", newdata = filter(tab_behav, !is.na(speed)), re_for
 bayes_R2(mod, resp = "speed", newdata = filter(tab_behav, !is.na(speed)))
 
 
-bayes_R2(mod, resp = "food22", newdata = filter(tab_behav, !is.na(food2)), re_formula = NA)
-bayes_R2(mod, resp = "food22", newdata = filter(tab_behav, !is.na(food2)))
+bayes_R2(mod, resp = "foodtransformed", newdata = filter(tab_behav, !is.na(food_transformed)), re_formula = NA)
+bayes_R2(mod, resp = "foodtransformed", newdata = filter(tab_behav, !is.na(food_transformed)))
 ```
 
 # Plots 
@@ -277,11 +349,12 @@ fits_food1 <- tibble(
   metacercariae = 0
 ) |>
   mutate(size_scaled = (size - mean_size) / sd_size) |>
-  add_epred_draws(mod, resp = "food22", re_formula = NA)
+  add_epred_draws(mod, resp = "foodtransformed", re_formula = NA) |>
+  mutate(.epred = inverse_SV2006(.epred, nobs_food))
 
 p_food1 <- ggplot(tab_behav) +
-  stat_lineribbon(data = fits_food1, aes(size, .epred * 2), fill = "grey", .width = 0.95) +
-  geom_point(aes(size, food, pch = food == 0), col = "grey40", alpha = 0.25) +
+  stat_lineribbon(data = fits_food1, aes(size, .epred * 2), fill = "#fab07c", .width = 0.95) +
+  geom_point(aes(size, food), col = "#d5905d", alpha = 0.25) +
   labs(x = "Shell size (mm)", y = "Food intake (g per test session)") +
   theme_bw() +
   theme(legend.position = "none")
@@ -303,28 +376,32 @@ fits_food2 <- tibble(
   sporocerc = c(0, 1),
   metacercariae = 0
 ) |>
-  add_epred_draws(mod, resp = "food22", re_formula = NA)
+  add_epred_draws(mod, resp = "foodtransformed", re_formula = NA) |>
+  mutate(.epred = inverse_SV2006(.epred, nobs_food))
 
 p_food2 <- ggplot(tab_behav) +
-  stat_eye(data = fits_food2, aes(sporocerc, .epred), fill="grey", .width = c(0, 0.95)) +
+  stat_eye(data = fits_food2, aes(sporocerc, .epred * 2, fill = factor(sporocerc)), .width = c(0, 0.95)) +
   geom_segment(
     data = snail_behav |> # drawing is easier if behaviours are in wide format, so we go back to there
       filter(Species == "Cornu_aspersum") |>
       left_join(parasites),
     aes(
       x = sporocerc - 0.25, xend = sporocerc + 0.25,
-      y = food_1, yend = food_2
+      y = food_1, yend = food_2, 
+      col = factor(sporocerc)
     ),
-    col = "grey70", alpha = 0.25
+    alpha = 0.25
   ) +
   geom_point(
     aes(
       sporocerc + 0.5 * (trial - 1.5), food,
-      pch = food == 0
-    ),
-    col = "grey40", alpha = 0.25
+      col=factor(sporocerc)
+    ), 
+    alpha = 0.25
   ) +
-  stat_eye(data = fits_food2, aes(sporocerc, .epred), .width = c(0, 0.95),fill=NA) +
+  stat_eye(data = fits_food2, aes(sporocerc, .epred * 2), .width = c(0, 0.95), fill = NA) +
+  scale_color_manual(values=c("#d5905d","#5e3c99"))+
+  scale_fill_manual(values=c("#fab07c","#b2abd2"))+
   labs(x = "Infected by sporocysts?", y = "Food intake (g per test session)") +
   scale_x_continuous(breaks = c(0, 1), labels = c("no", "yes")) +
   theme_bw() +
@@ -352,24 +429,28 @@ fits_speed <- tibble(
   add_epred_draws(mod, resp = "speed", re_formula = NA)
 
 p_speed <- ggplot(tab_behav) +
-  stat_eye(data = fits_speed, aes(nematodes_genitalia, .epred), fill="grey",.width = c(0, 0.95)) +
+  stat_eye(data = fits_speed, aes(nematodes_genitalia, .epred, fill = factor(nematodes_genitalia)), .width = c(0, 0.95)) +
   geom_segment(
     data = snail_behav |> # drawing is easier if behaviours are in wide format, so we go back to there
       filter(Species == "Cornu_aspersum") |>
       left_join(parasites),
     aes(
       x = nematodes_genitalia - 0.25, xend = nematodes_genitalia + 0.25,
-      y = dist_1 / time_1, yend = dist_2 / time_2
+      y = dist_1 / time_1, yend = dist_2 / time_2,
+      col =factor(nematodes_genitalia)
     ),
-    col = "grey70", alpha = 0.25
+    alpha = 0.25
   ) +
   geom_point(
     aes(
       nematodes_genitalia + 0.5 * (trial - 1.5), speed,
+      col =factor(nematodes_genitalia)
     ),
-    col = "grey40", alpha = 0.25
+    alpha = 0.25
   ) +
-  stat_eye(data = fits_speed, aes(nematodes_genitalia, .epred), .width = c(0, 0.95), fill=NA) +
+  stat_eye(data = fits_speed, aes(nematodes_genitalia, .epred), .width = c(0, 0.95), fill = NA) +
+  scale_color_manual(values=c("#d5905d","#5e3c99"))+
+  scale_fill_manual(values=c("#fab07c","#b2abd2"))+
   labs(x = "Infected by _Nemhelix bakeri_?", y = "Movement speed (mm/s)") +
   scale_x_continuous(breaks = c(0, 1), labels = c("no", "yes")) +
   theme_bw() +

@@ -189,23 +189,23 @@ $$
 $$
 \mu_{i[C]} = \beta_{0[C]} + \beta_{1[C]} \times x_{1,i} + \alpha_{i[C]},\\
 $$
-with the site-level random intercepts $\alpha_{i}$ for each response linked together through a common variance-covariance matrix $\boldsymbol{\Omega}_{i}$:
+with the site-level random intercepts $\alpha_{i}$ for each response linked together through a common variance-covariance matrix $\boldsymbol{\Omega}_{\alpha}$:
 $$
 \begin{bmatrix} \alpha_{i[D]} \\ \alpha_{i[C]} \end{bmatrix} 
 \sim 
 \textrm{MVNormal}
 \begin{pmatrix}
 \begin{bmatrix} 0 \\ 0  \end{bmatrix},
-\boldsymbol{\Omega_{i}}
+\boldsymbol{\Omega_{\alpha}}
 \end{pmatrix},
 $$
 $$
-\boldsymbol{\Omega}_{i} = 
+\boldsymbol{\Omega}_{\alpha} = 
 \begin{bmatrix}
 \sigma_{\alpha[D]} & 0\\
 0 & \sigma_{\alpha[C]}\\
 \end{bmatrix}
-\boldsymbol{R}_{i}
+\boldsymbol{R}_{\alpha}
 \begin{bmatrix}
 \sigma_{\alpha[D]} & 0\\
 0 & \sigma_{\alpha[C]}\\
@@ -250,18 +250,18 @@ $$
 \textrm{MVNormal}
 \begin{pmatrix}
 \begin{bmatrix} 0 \\ 0 \\ 0 \\ 0  \end{bmatrix},
-\boldsymbol{\Omega}
+\boldsymbol{\Omega_{\alpha}}
 \end{pmatrix},
 $$
 $$
-\boldsymbol{\Omega} = 
+\boldsymbol{\Omega_{\alpha}} = 
 \begin{bmatrix}
 \sigma_{\alpha[S]} & 0 & 0 & 0\\
 0 & \sigma_{\alpha[M]} & 0 & 0\\
 0 & 0 &\sigma_{\alpha[B]} & 0\\
 0 & 0 & 0 &\sigma_{\alpha[O]}\\
 \end{bmatrix}
-\boldsymbol{R}
+\boldsymbol{R_{\alpha}}
 \begin{bmatrix}
 \sigma_{\alpha[S]} & 0 & 0 & 0\\
 0 & \sigma_{\alpha[M]} & 0 & 0\\
@@ -273,7 +273,9 @@ We used $\mathrm{Normal}(0,1.5)$ priors for the intercepts $\beta_{0}$ [which ar
 
 ## Model 3 - Effect of urbanization, shell phenotype and parasites on behaviour
 
-Finally, we can model the proportion of **F**ood consumed $F_{i,j,k}$ (site $i$, snail $j$, trial $k$) and movement **A**ctivity $A_{i,j,k}$ as follows:
+Finally, we can model the proportion of **F**ood consumed $F_{i,j,k}$ (site $i$, snail $j$, trial $k$)[^1] and movement **A**ctivity $A_{i,j,k}$ as follows:
+
+[^1]: proportions transformed to avoid issues with the few zeroes present, following @doumaAnalysingContinuousProportions2019 (see main text).
 
 $$
 F_{i,j,k} \sim \mathrm{Beta}(p_{i,j[F]}, \phi_{[F]}),\\
@@ -314,7 +316,7 @@ $$
 \boldsymbol{\Omega_{\alpha}} = 
 \begin{bmatrix}
 \sigma_{\alpha[F]} & 0\\
-0 & \sigma_{\alpha[F]}\\
+0 & \sigma_{\alpha[A]}\\
 \end{bmatrix}
 \boldsymbol{R_{\alpha}}
 \begin{bmatrix}
@@ -326,7 +328,7 @@ $$
 \boldsymbol{\Omega_{\gamma}} = 
 \begin{bmatrix}
 \sigma_{\gamma[F]} & 0\\
-0 & \sigma_{\gamma[F]}\\
+0 & \sigma_{\gamma[A]}\\
 \end{bmatrix}
 \boldsymbol{R_{\gamma}}
 \begin{bmatrix}
@@ -334,7 +336,7 @@ $$
 0 & \sigma_{\gamma[A]}\\
 \end{bmatrix}.
 $$
-We set a $\mathrm{Normal}(0,1.5)$ prior for $\beta_{0[F]}$ (interpretable as the logit of a proportion, see **Model 2**) and $\mathrm{Normal}(0,1)$ priors for all other $\beta$s. As with previous models, we used  $\mathrm{Half-Normal}(0,1)$ priors for random effect SDs $\sigma$ and an $\mathrm{LKJ}(2)$ prior for the correlation matrices $\boldsymbol{R}$. We set $\mathrm{Exponential}(1)$ priors for both $1/\phi$ and $\theta$; note that for the Beta model we put the prior on the inverse of the precision (i.e. the dispersion), rather than the precision itself, to avoid setting too much much prior mass on high dispersion (see e.g. <https://github.com/stan-dev/stan/wiki/Prior-Choice-Recommendations#story-when-the-generic-prior-fails-the-case-of-the-negative-binomial>, \[accessed 2024-10-16\]).
+We set a $\mathrm{Normal}(0,1.5)$ prior for $\beta_{0[F]}$ (interpretable as the logit of a proportion, see **Model 2**) and $\mathrm{Normal}(0,1)$ priors for all other $\beta$s. As with previous models, we used  $\mathrm{Half-Normal}(0,1)$ priors for random effect SDs $\sigma$ and an $\mathrm{LKJ}(2)$ prior for the correlation matrices $\boldsymbol{R}$. We set a $\mathrm{Exponential}(1)$ prior on $\theta$. For the Beta precision parameter $\phi$, we follow @mcelreathStatisticalRethinkingBayesian2020 in setting a $\mathrm{Exponential}(1)$ prior on $(\phi - 2)$ rather than $\phi$ itself.
 
 
 # S4 - Overview of parasite prevalences
@@ -553,7 +555,7 @@ Running this model gives an estimate for the among-sites correlation of `r print
 #| echo: false
 #| message: false
 ggplot(posterior_cor) +
-  stat_halfeye(aes(x = cor), .width = c(0, 0.95)) +
+  stat_halfeye(aes(x = cor), .width = c(0, 0.95), fill = "#fab07c") +
   geom_vline(xintercept = 0, lty = 2) +
   scale_x_continuous("Among-sites correlation (posterior)", lim = c(-1, 1)) +
   scale_y_continuous("") +

@@ -7,17 +7,17 @@ editor_options:
 
 
 ```{r load-packages}
-library(brms)      # CRAN v2.22.0 
-library(cmdstanr) # https://stan-dev.r-universe.dev v0.9.0 
-library(ggtext)    # CRAN v0.1.2 
-library(ncf)       # CRAN v1.3-2 
-library(patchwork) # CRAN v1.3.0 
-library(rptR)      # CRAN v0.9.22 
-library(sf)        # CRAN v1.0-20 
-library(tidyverse) # CRAN v2.0.0 
-library(tidybayes) # CRAN v3.0.7 
+library(brms) # CRAN v2.22.0
+library(cmdstanr) # https://stan-dev.r-universe.dev v0.9.0
+library(ggtext) # CRAN v0.1.2
+library(ncf) # CRAN v1.3-2
+library(patchwork) # CRAN v1.3.0
+library(rptR) # CRAN v0.9.22
+library(sf) # CRAN v1.0-20
+library(tidyverse) # CRAN v2.0.0
+library(tidybayes) # CRAN v3.0.7
 
-library(here)      # CRAN v1.0.1 
+library(here) # CRAN v1.0.1
 
 options(mc.cores = 4)
 ```
@@ -145,35 +145,57 @@ bf_sporocerc <- bf(
 
 
 ```{r model}
-mod <- brm(mvbf(bf_nemhelix, bf_nema_other, bf_meta, bf_sporocerc, rescor = FALSE),
-  data = tab_parasites,
-  backend = "cmdstanr",
-  seed = 42,
-  iter = 6000, warmup = 3000,
-  save_pars = save_pars(group = TRUE, latent = TRUE),
-  prior = c(
-    set_prior("normal(0,1.5)",
-      class = "Intercept",
-      resp = c("nematodesgenitalia", "othernematodes", "metacercariae", "sporocerc")
-    ),
-    set_prior("normal(0,1)",
-      class = "b",
-      resp = c("nematodesgenitalia", "othernematodes", "metacercariae", "sporocerc")
-    ),
-    set_prior("normal(0,1)",
-      class = "sd",
-      resp = c("nematodesgenitalia", "othernematodes", "metacercariae", "sporocerc")
-    ),
-    ## using an exponential(1) prior for the SDs doesn't change anything
-    set_prior("lkj(2)", class = "cor")
+if (file.exists(here("R_output", "model_parasite.RDS")))
+# this if-else statement is avoid re-fitting a model when knitting Rmd file if there is already one existing in R_output
+# to override, re-run the model and re-save manually by selecting relevant code lines then knit (or delete the RDS object)
+  {
+    mod <- readRDS(here("R_output", "model_parasite.RDS"))
+  } else {
+  mod <- brm(mvbf(bf_nemhelix, bf_nema_other, bf_meta, bf_sporocerc, rescor = FALSE),
+    data = tab_parasites,
+    backend = "cmdstanr",
+    seed = 42,
+    iter = 6000, warmup = 3000,
+    save_pars = save_pars(group = TRUE, latent = TRUE),
+    prior = c(
+      set_prior("normal(0,1.5)",
+        class = "Intercept",
+        resp = c("nematodesgenitalia", "othernematodes", "metacercariae", "sporocerc")
+      ),
+      set_prior("normal(0,1)",
+        class = "b",
+        resp = c("nematodesgenitalia", "othernematodes", "metacercariae", "sporocerc")
+      ),
+      set_prior("normal(0,1)",
+        class = "sd",
+        resp = c("nematodesgenitalia", "othernematodes", "metacercariae", "sporocerc")
+      ),
+      ## using an exponential(1) prior for the SDs doesn't change anything
+      set_prior("lkj(2)", class = "cor")
+    )
   )
-)
+
+  saveRDS(mod, file = here("R_output", "model_parasite.RDS"))
+}
+
+summary(mod)
 ```
 
-An *example* of posterior predictive checks:
+Posterior predictive checks:
 
 ```{r pp-checks}
+pp_check(mod, resp = "nematodesgenitalia", "bars_grouped", group = "SiteID", ndraws = 1000)
+# we use grouped bar plots at the level of the sitebecause binary responses
+pp_check(mod, resp = "nematodesgenitalia", "pit_ecdf", prob = 0.95, plot_diff = TRUE)
+
+pp_check(mod, resp = "othernematodes", "bars_grouped", group = "SiteID", ndraws = 1000)
+pp_check(mod, resp = "othernematodes", "pit_ecdf", prob = 0.95, plot_diff = TRUE)
+
+pp_check(mod, resp = "sporocerc", "bars_grouped", group = "SiteID", ndraws = 1000)
+pp_check(mod, resp = "sporocerc", "pit_ecdf", prob = 0.95, plot_diff = TRUE)
+
 pp_check(mod, resp = "metacercariae", "bars_grouped", group = "SiteID", ndraws = 1000)
+pp_check(mod, resp = "metacercariae", "pit_ecdf", prob = 0.95, plot_diff = TRUE)
 ```
 
 We again check the residual spatial autocorrelation (an example, all four parasites similar):
@@ -227,8 +249,8 @@ fits_meta <- tibble(
   ungroup()
 
 p_meta <- ggplot(tab_parasites) +
-  stat_lineribbon(data = fits_meta, aes(size, .epred), fill = "#9ebcda", .width = 0.95) +
-  geom_point(aes(size, metacercariae), col = "#8c96c6", alpha = 0.25) +
+  stat_lineribbon(data = fits_meta, aes(size, .epred), fill = "#fab07c", .width = 0.95) +
+  geom_point(aes(size, metacercariae), col = "#d5905d", alpha = 0.25) +
   labs(x = "Shell size (mm)", y = "Probability of infection by metacercariae") +
   theme_bw()
 p_meta
@@ -245,8 +267,8 @@ fits_nemhelix <- tibble(
   add_epred_draws(mod, resp = "nematodesgenitalia", re_formula = NA)
 
 p_nemhelix <- ggplot(tab_parasites) +
-  stat_lineribbon(data = fits_nemhelix, aes(avg_reflectance, .epred), fill = "#9ebcda", .width = 0.95) +
-  geom_point(aes(avg_reflectance, metacercariae), col = "#8c96c6", alpha = 0.25) +
+  stat_lineribbon(data = fits_nemhelix, aes(avg_reflectance, .epred), fill = "#fab07c", .width = 0.95) +
+  geom_point(aes(avg_reflectance, metacercariae), col = "#d5905d", alpha = 0.25) +
   labs(x = "Shell reflectance (%)", y = "Probability of infection by _Nemhelix bakeri_") +
   theme_bw() +
   theme(axis.title.y = element_markdown())

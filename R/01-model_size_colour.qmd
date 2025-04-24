@@ -217,7 +217,18 @@ pp_check(mod, resp = "reflectscaled", ndraws = 50) +
 
 pp_check(mod, resp = "sizescaled", ndraws = 50)
 
-## see also other pp_check diagnostics
+## see also other pp_check diagnostics, for instance
+pp_check(mod, resp = "sizescaled", "pit_ecdf", prob = 0.95)
+pp_check(mod, resp = "sizescaled", "pit_ecdf", prob = 0.95, plot_diff = TRUE)
+pp_check(mod, resp = "reflectscaled", "pit_ecdf", prob = 0.95)
+pp_check(mod, resp = "reflectscaled", "pit_ecdf", prob = 0.95, plot_diff = TRUE)
+# which is similar in spirit (but not identical) to the residual tests in the DHARMa package
+# or:
+pp_check(mod, resp = "sizescaled", "intervals", prob_outer = 0.95)
+pp_check(mod, resp = "reflectscaled", "intervals", prob_outer = 0.95)
+# showing most points are well within their prediction intervals
+# about 15 observations are not in each response, which is what you'd expect for
+# 95% prediction intervals and about 300 observations
 ```
 
 (Let's nonetheless have a look at what the reflectance model would look with a Beta distribution:)
@@ -311,8 +322,8 @@ fits_size <- tibble(dist_urban = (15:60) * 100) |>
   mutate(.epred = .epred * sd_size + mean_size)
 
 p_size <- ggplot(tab_size) +
-  stat_lineribbon(data = fits_size, aes(dist_urban, .epred), fill = "#9ebcda", .width = 0.95) +
-  geom_point(aes(dist_urban, size), col = "#8c96c6", alpha = 0.25) +
+  stat_lineribbon(data = fits_size, aes(dist_urban, .epred), fill = "#fab07c", .width = 0.95) +
+  geom_point(aes(dist_urban, size), col = "#d5905d", alpha = 0.25) +
   stat_pointinterval(aes(dist_urban, size, group = SiteID), .width = 0, point_size = 3) +
   labs(x = "Distance to urban centroid (m)", y = "Shell size (mm)") +
   theme_bw()
@@ -327,8 +338,8 @@ fits_reflect <- tibble(dist_urban = (15:60) * 100, sigma_reflect_scaled = mean(t
   mutate(.epred = .epred * sd_reflect + mean_reflect)
 
 p_color <- ggplot(tab_size) +
-  stat_lineribbon(data = fits_reflect, aes(dist_urban, .epred), fill = "#9ebcda", .width = 0.95) +
-  geom_point(aes(dist_urban, avg_reflectance), col = "#8c96c6", alpha = 0.25) +
+  stat_lineribbon(data = fits_reflect, aes(dist_urban, .epred), fill = "#fab07c", .width = 0.95) +
+  geom_point(aes(dist_urban, avg_reflectance), col = "#d5905d", alpha = 0.25) +
   stat_pointinterval(aes(dist_urban, avg_reflectance, group = SiteID), .width = 0, point_size = 3) +
   labs(x = "Distance to urban centroid (m)", y = "Mean shell reflectance (%)") +
   theme_bw() +

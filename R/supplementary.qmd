@@ -13,16 +13,17 @@ bibliography: bib_suppl.bib
 #| echo: false
 #| message: false
 #| output: false
-library(brms)       # CRAN v2.22.0 
-library(FactoMineR) # CRAN v2.11 
-library(patchwork)  # CRAN v1.3.0 
-library(sp)         # CRAN v2.2-0 
+library(brms) # CRAN v2.22.0
+library(FactoMineR) # CRAN v2.11
+library(ggtext) # CRAN v0.1.2
+library(patchwork) # CRAN v1.3.0
+library(sp) # CRAN v2.2-0
 # sp used for decimal to DMS conversion of latlon for S4 table
-library(sf)         # CRAN v1.0-20 
-library(tidybayes)  # CRAN v3.0.7 
-library(tidyverse)  # CRAN v2.0.0 
+library(sf) # CRAN v1.0-20
+library(tidybayes) # CRAN v3.0.7
+library(tidyverse) # CRAN v2.0.0
 
-library(here)       # CRAN v1.0.1 
+library(here) # CRAN v1.0.1
 ```
 
 ```{r data}
@@ -118,7 +119,9 @@ Additionally, while it was **not** included in the PCA, distance to the urban ce
 ```{r}
 #| echo: false
 #| message: false
-#| height: 2
+#| fig-height: 2
+#| fig-align: "center"
+
 (PCplot_ind | PCplot_var)
 ```
 
@@ -126,7 +129,7 @@ Additionally, while it was **not** included in the PCA, distance to the urban ce
 
 # S2 - Reflectance measurements - extended methods
 
-As mentioned in the main text, we measured shell reflectance using standardised photographs of cleaned and dried shells pleaced near a grey standard card with 9 rectangular cells (7 greys, one white, one black, **Fig. S2-1**), with the grey scale reflectance values for each rectangle previously determined using spectrophotometry. 
+As mentioned in the main text, we measured shell reflectance using standardised photographs of cleaned and dried shells placed near a grey standard card with 9 rectangular cells (7 greys, one white, one black, **Fig. S2-1**), with the grey scale reflectance values for each rectangle previously determined using spectrophotometry. 
 
 To determine these, the diffuse reflectance was measured using a AvaSpec-2048 spectrometer and a dual light source set-up (AvaLight-DH-S deuterium halogen and AvaLight-HAL-S-MINI light source) with a bifurcated probe and integrating sphere (AvaSphere-50-REFL). A white reflectance standard (WS-2, Avantes) and black standard (BS-2, Avantes) were used for standardization. For five randomly selected cards, three replicates of each rectangle per card were measured. Reflectance spectra were processed using the _pavo_ R package [@maiaPavo2New2019], and mean reflectance obtained for each grey cell by averaging the values for the three replicates of each card, then averaging these values across the five replicate cards (see **Data and code availability** in the main text for resulting values).
 
@@ -134,7 +137,7 @@ We converted white balanced RAW images to TIFF files to use in ImageJ/Fiji [@sch
 
 Periostracum, the outer pigmented layer of the shell, typically gets increasingly damaged and worn as snails age [@williamsonAgeDeterminationJuvenile1979]. Because of this, we did not measure the average RGB values over the entire shell, as they would not be an accurate representation of colour as it was produced by the snails. We instead measured mean RGB values of an unworn rectangular area covering the entire height of the largest (= most recent) whorl (**Fig. S2-1**). The selected rectangle was parallel to growth lines (which are at an angle compared to the columellar axis) and as close as possible to the columellar axis; its exact positioning and width varied so that no areas with worn periostracum were included. This had the added benefit of avoiding areas with light reflections and the presence of the individual paint marks in some images. We used the average predicted reflectance across RGB channels in our further analyses. 
 
-![](Fig_S2_1.jpg){width=80%}
+![](Fig_S2_1.jpg){width=80% fig-align="center"}
 
 **Figure S2-1.** Example photograph used in reflectance analysis, showing both the snail shell in dorsal view and the grey standard card. The yellow rectangle highlights the area of the shell typically used in measurements.
 
@@ -339,9 +342,365 @@ $$
 We set a $\mathrm{Normal}(0,1.5)$ prior for $\beta_{0[F]}$ (interpretable as the logit of a proportion, see **Model 2**) and $\mathrm{Normal}(0,1)$ priors for all other $\beta$s. As with previous models, we used  $\mathrm{Half-Normal}(0,1)$ priors for random effect SDs $\sigma$ and an $\mathrm{LKJ}(2)$ prior for the correlation matrices $\boldsymbol{R}$. We set a $\mathrm{Exponential}(1)$ prior on $\theta$. For the Beta precision parameter $\phi$, we follow @mcelreathStatisticalRethinkingBayesian2020 in setting a $\mathrm{Exponential}(1)$ prior on $(\phi - 2)$ rather than $\phi$ itself.
 
 
-# S4 - Overview of parasite prevalences
+# S4 - Model posteriors
 
-**Table S4-1.** Observed prevalences of each parasite type in sampled _Cornu aspersum_ snails, both per site and overall. Sites are ordered by increasing distance from the city centroid ("Distance (m)" column).
+In the main text, only parameter summaries in the form "mean [95% quantile interval]" are given, for simplicity. We provide below the corresponding plots showing the full posterior distributions.
+
+<!--TO DO-->
+```{r import-models}
+#| echo: false
+#| message: false
+#| output: false
+mod_shell <- readRDS(here("R_output", "model_shell.RDS"))
+mod_parasite <- readRDS(here("R_output", "model_parasite.RDS"))
+mod_behaviour <- readRDS(here("R_output", "model_behaviour.RDS"))
+```
+
+## Model 1 - Effect of urbanization on shell phenotypic traits
+
+```{r make-table-shell}
+#| echo: false
+#| message: false
+#| output: false
+posteriors_shell <- as_draws_df(mod_shell) |>
+  select(
+    starts_with("b_"), starts_with("sd_"), starts_with("sigma_"),
+    starts_with("cor_"), starts_with("rescor_"), .chain, .iteration, .draw
+  ) |>
+  pivot_longer(-c(.chain, .iteration, .draw)) |>
+  mutate(vartype = case_when(
+    str_detect(name, "^b_") ~ "fixed",
+    str_detect(name, "^sigma_") ~ "SD",
+    str_detect(name, "^sd_") ~ "SD",
+    str_detect(name, "^cor_") ~ "corr",
+    str_detect(name, "^rescor_") ~ "corr"
+  )) |>
+  mutate(response = case_when(
+    str_detect(name, "sizescale") & vartype != "corr" ~ "shell size",
+    str_detect(name, "reflectscaled") & vartype != "corr" ~ "shell reflectance",
+    TRUE ~ NA_character_
+  )) |>
+  mutate(fixedvariable = case_when(
+    vartype == "fixed" & str_detect(name, "Intercept") ~ "Intercept",
+    vartype == "fixed" & str_detect(name, "dist_urban") ~ "distance to city centroid",
+    TRUE ~ NA_character_
+  )) |>
+  mutate(SDlevel = case_when(
+    str_detect(name, "^sd_SiteID") ~ "site-level (random effect)",
+    str_detect(name, "^sigma_") ~ "residual",
+    TRUE ~ NA_character_
+  )) |>
+  mutate(corlevel = case_when(
+    str_detect(name, "^cor_SiteID") ~ "site-level (random effect)",
+    str_detect(name, "^rescor_") ~ "residual",
+    TRUE ~ NA_character_
+  ))
+```
+
+
+```{r make-plot-shell}
+#| echo: false
+#| message: false
+#| fig-height: 4
+#| fig-width: 8
+
+p1_shell <- posteriors_shell |>
+  filter(vartype == "fixed") |>
+  ggplot() +
+  stat_halfeye(aes(x = value, y = fixedvariable),
+    .width = c(0, 0), fill = "#fab07c",
+    normalize = "xy"
+  ) +
+  geom_vline(xintercept = 0, linetype = 2) +
+  facet_grid(cols = vars(response), rows = vars("fixed effects"))
+
+p2_shell <- posteriors_shell |>
+  filter(vartype == "SD") |>
+  ggplot() +
+  stat_halfeye(aes(x = value, y = SDlevel),
+    .width = c(0, 0), fill = "#fab07c",
+    normalize = "xy"
+  ) +
+  facet_grid(cols = vars(response), rows = vars("standard deviations"))
+
+p3_shell <- posteriors_shell |>
+  filter(vartype == "corr") |>
+  ggplot() +
+  stat_halfeye(aes(x = value, y = corlevel),
+    .width = c(0, 0), fill = "#fab07c",
+    normalize = "xy"
+  ) +
+  geom_vline(xintercept = 0, linetype = 2) +
+  facet_grid(rows = vars("between-responses correlations"))
+
+(p1_shell / p2_shell / p3_shell) &
+  theme_bw() &
+  theme(axis.title = element_blank(), strip.text.y = element_text(angle = 0))
+```
+
+**Figure S4-1.** Posterior densities for the "shell phenotype" model.
+
+
+## Model 2 - Effect of urbanization and shell phenotype on parasites
+
+```{r make-table-para}
+#| echo: false
+#| message: false
+#| output: false
+
+posteriors_para <- as_draws_df(mod_parasite) |>
+  select(
+    starts_with("b_"), starts_with("bsp_"), starts_with("sd_"),
+    starts_with("cor_"), .chain, .iteration, .draw
+  ) |>
+  pivot_longer(-c(.chain, .iteration, .draw)) |>
+  mutate(vartype = case_when(
+    str_detect(name, "^b_") ~ "fixed",
+    str_detect(name, "^bsp_") ~ "fixed",
+    str_detect(name, "^sd_") ~ "SD",
+    str_detect(name, "^cor_") ~ "corr"
+  )) |>
+  mutate(response = case_when(
+    str_detect(name, "nematodesgenitalia") & vartype != "corr" ~ "*Nemhelix bakeri*",
+    str_detect(name, "othernematodes") & vartype != "corr" ~ "other nematodes",
+    str_detect(name, "sporocerc") & vartype != "corr" ~ "sporocysts",
+    str_detect(name, "metacercariae") & vartype != "corr" ~ "metacercariae",
+    TRUE ~ NA_character_
+  )) |>
+  mutate(fixedvariable = case_when(
+    vartype == "fixed" & str_detect(name, "Intercept") ~ "Intercept",
+    vartype == "fixed" & str_detect(name, "dist_urban") ~ "distance to city centroid",
+    vartype == "fixed" & str_detect(name, "size_scaled") ~ "shell size",
+    vartype == "fixed" & str_detect(name, "reflect_scaled") ~ "shell reflectance",
+    TRUE ~ NA_character_
+  )) |>
+  mutate(SDlevel = case_when(str_detect(name, "^sd_SiteID") ~ "site-level (random effect)"))
+```
+
+```{r make-plot-para-1}
+#| echo: false
+#| message: false
+#| fig-height: 5
+#| fig-width: 8
+
+p1_para <- posteriors_para |>
+  filter(vartype == "fixed") |>
+  ggplot() +
+  stat_halfeye(
+    aes(x = value, y = fct_relevel(factor(fixedvariable),
+      "shell reflectance", "shell size",
+      "distance to city centroid",
+      "Intercept",
+      after = Inf
+    )),
+    .width = c(0, 0),
+    normalize = "xy",
+    fill = "#fab07c"
+  ) +
+  geom_vline(xintercept = 0, linetype = 2) +
+  facet_grid(cols = vars(response), rows = vars("fixed effects"))
+
+p2_para <- posteriors_para |>
+  filter(vartype == "SD") |>
+  ggplot() +
+  stat_halfeye(aes(x = value, y = SDlevel), .width = c(0, 0), fill = "#fab07c") +
+  facet_grid(cols = vars(response), rows = vars("standard deviations"))
+
+(p1_para / p2_para) &
+  theme_bw() &
+  theme(
+    axis.title = element_blank(),
+    strip.text.y = element_text(angle = 0),
+    strip.text.x = element_markdown()
+  )
+```
+
+**Figure S4-2.** Posterior densities for the fixed effects and random effect SDs of the parasite prevalence model.
+
+```{r make-plot-para-2}
+#| echo: false
+#| message: false
+#| fig-height: 2.5
+#| fig-width: 4.5
+#| fig-align: "right"
+
+posteriors_para |>
+  filter(vartype == "corr") |>
+  select(.chain, .iteration, .draw, name, value) |>
+  mutate(
+    resp1 = case_when(
+      str_detect(name, "SiteID__nematodesgenitalia") ~ "*Nemhelix bakeri*",
+      str_detect(name, "SiteID__othernematodes") ~ "other nematodes",
+      str_detect(name, "SiteID__sporocerc") ~ "sporocysts",
+      str_detect(name, "SiteID__metacercariae") ~ "metacercariae"
+    ),
+    resp2 = case_when(
+      str_detect(name, "Intercept__nematodesgenitalia") ~ "*Nemhelix bakeri*",
+      str_detect(name, "Intercept__othernematodes") ~ "other nematodes",
+      str_detect(name, "Intercept__sporocerc") ~ "sporocysts",
+      str_detect(name, "Intercept__metacercariae") ~ "metacercariae"
+    )
+  ) |>
+  mutate(
+    resp1 = fct_relevel(resp1, "metacercariae", after = Inf),
+    resp2 = fct_relevel(resp2, "other nematodes", after = 0)
+  ) |>
+  ggplot() +
+  stat_halfeye(aes(x = value),
+    .width = c(0, 0),
+    normalize = "xy",
+    fill = "#fab07c"
+  ) +
+  facet_grid(rows = vars(resp2), cols = vars(resp1)) +
+  geom_vline(xintercept = 0, linetype = 2) +
+  theme_bw() +
+  theme(
+    axis.title = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    strip.text.y = element_markdown(angle = 0, size = 6.5),
+    strip.text.x = element_markdown(size = 6.5)
+  )
+```
+
+**Figure S4-3.** Posterior densities for the site-level correlations between responses in the parasite prevalence model.
+
+## Model 3 - Effect of urbanization, shell phenotype and parasites on behaviour
+
+```{r make-table-behaviour}
+#| echo: false
+#| message: false
+#| output: false
+
+posteriors_behaviour <- as_draws_df(mod_behaviour) |>
+  select(
+    starts_with("b_"), starts_with("bsp_"), starts_with("sd_"),
+    starts_with("shape_"),
+    starts_with("cor_"), .chain, .iteration, .draw
+  ) |>
+  # get the correct phi (see Supplementary S3)
+  mutate(phi_foodtransformed = b_foodtransformed_phi2_Intercept + 2) |>
+  select(-b_foodtransformed_phi2_Intercept) |>
+  pivot_longer(-c(.chain, .iteration, .draw)) |>
+  mutate(vartype = case_when(
+    str_detect(name, "^b_") ~ "fixed",
+    str_detect(name, "^bsp_") ~ "fixed",
+    str_detect(name, "^sd_") ~ "SD",
+    str_detect(name, "^cor_") ~ "corr",
+    str_detect(name, "^phi") ~ "distri",
+    str_detect(name, "^shape") ~ "distri"
+  )) |>
+  mutate(response = case_when(
+    str_detect(name, "foodtransformed") & vartype != "corr" ~ "food intake",
+    str_detect(name, "speed") & vartype != "corr" ~ "movement",
+    TRUE ~ NA_character_
+  )) |>
+  mutate(fixedvariable = case_when(
+    vartype == "fixed" & str_detect(name, "Intercept") ~ "Intercept",
+    vartype == "fixed" & str_detect(name, "dist_urban") ~ "distance to city centroid",
+    vartype == "fixed" & str_detect(name, "size_scaled") ~ "shell size",
+    vartype == "fixed" & str_detect(name, "reflect_scaled") ~ "shell reflectance",
+    vartype == "fixed" & str_detect(name, "nematodes_genitalia") ~ "*Nemhelix bakeri* present",
+    vartype == "fixed" & str_detect(name, "other_nematodes") ~ "other nematodes present",
+    vartype == "fixed" & str_detect(name, "sporocerc") ~ "sporocysts present",
+    vartype == "fixed" & str_detect(name, "metacercariae") ~ "metacercariae present",
+    TRUE ~ NA_character_
+  )) |>
+  mutate(SDlevel = case_when(
+    str_detect(name, "^sd_SiteID") ~ "site-level (random effect)",
+    str_detect(name, "^sd_SnailID") ~ "snail-level (random effect)",
+    TRUE ~ NA_character_
+  )) |>
+  mutate(corlevel = case_when(
+    str_detect(name, "^cor_SiteID") ~ "site-level (random effect)",
+    str_detect(name, "^cor_SnailID") ~ "snail-level (random effect)",
+    TRUE ~ NA_character_
+  ))
+```
+
+```{r make-plots-behaviour-1}
+#| echo: false
+#| message: false
+#| fig-height: 5
+#| fig-width: 8
+
+
+p1_behaviour <- posteriors_behaviour |>
+  filter(vartype == "fixed") |>
+  ggplot() +
+  stat_halfeye(
+    aes(x = value, y = fct_relevel(factor(fixedvariable),
+      "other nematodes present",
+      "*Nemhelix bakeri* present",
+      "shell reflectance", "shell size",
+      "distance to city centroid",
+      "Intercept",
+      after = Inf
+    )),
+    .width = c(0, 0),
+    normalize = "xy",
+    fill = "#fab07c"
+  ) +
+  geom_vline(xintercept = 0, linetype = 2) +
+  facet_grid(cols = vars(response), rows = vars("fixed effects"))
+
+
+p2_behaviour <- posteriors_behaviour |>
+  filter(vartype == "SD") |>
+  ggplot() +
+  stat_halfeye(aes(x = value, y = SDlevel),
+    .width = c(0, 0),
+    normalize = "xy", fill = "#fab07c"
+  ) +
+  facet_grid(cols = vars(response), rows = vars("standard deviations"))
+
+(p1_behaviour / p2_behaviour) &
+  theme_bw() &
+  theme(
+    axis.title = element_blank(),
+    axis.text.y = element_markdown(),
+    strip.text.y = element_text(angle = 0)
+  )
+```
+
+**Figure S4-4.** Posterior densities for the fixed effects and random effect SDs of the behaviour model.
+
+```{r make-plots-behaviour-2}
+#| echo: false
+#| message: false
+#| fig-height: 3
+#| fig-width: 8
+
+p3_behaviour <- posteriors_behaviour |>
+  filter(vartype == "distri") |>
+  ggplot() +
+  stat_halfeye(aes(x = value, y = ""),
+    .width = c(0, 0),
+    normalize = "xy", fill = "#fab07c"
+  ) +
+  facet_grid(cols = vars(response), rows = vars("distributional parameters"), scales = "free_x")
+
+p4_behaviour <- posteriors_behaviour |>
+  filter(vartype == "corr") |>
+  ggplot() +
+  stat_halfeye(aes(x = value, y = fct_rev(corlevel)),
+    .width = c(0, 0),
+    normalize = "xy", fill = "#fab07c"
+  ) +
+  geom_vline(xintercept = 0, linetype = 2) +
+  facet_grid(rows = vars("between-responses correlations"))
+
+(p3_behaviour / p4_behaviour) &
+  theme_bw() &
+  theme(axis.title = element_blank(), strip.text.y = element_text(angle = 0))
+```
+
+**Figure S4-5.** Posterior densities for the distributional parameters and correlations between responses of the parasite prevalence model. Distributional parameters are a precision parameter $\phi$ for the food intake submodel and a shape parameter $\theta$ for the movement model (see **Supplementary Material S3** for details).
+
+
+# S5 - Overview of parasite prevalences
+
+**Table S5-1.** Observed prevalences of each parasite type in sampled _Cornu aspersum_ snails, both per site and overall. Sites are ordered by increasing distance from the city centroid ("Distance (m)" column).
 
 ```{r}
 #| echo: false
@@ -431,7 +790,7 @@ kbl(rbind(ppsites, ppoverall), escape = FALSE) |>
   )
 ```
 
-# S5 - Investigating the site-level correlation between reflectance and _N. bakeri_ prevalence
+# S6 - Investigating the site-level correlation between reflectance and _N. bakeri_ prevalence
 
 In the main text, we ran analyses where individual shell traits were used as predictors for individual parasite prevalence. We found among other things that shell reflectance was linked to _Nemhelix bakeri_ prevalence (main text **Fig. 3**). At the same time, we found that for both reflectance and _N. bakeri_ prevalence, a substantial proportion of the total variance was at the population/site level.
 
@@ -504,58 +863,16 @@ print_summarised_cor <- paste0(
 )
 ```
 
-Running this model gives an estimate for the among-sites correlation of `r print_summarised_cor`, which is not different from zero (**Fig. S5-1**). While this does not necessarily mean that the link we uncovered in the main text is primarily due to _within-population_ correlations (especially given the low number of sites with non-zero prevalence, **Supplementary Material S4**), it does suggest this may be the case.
+Running this model gives an estimate for the among-sites correlation of `r print_summarised_cor`, which is not different from zero (**Fig. S6-1**). While this does not necessarily mean that the link we uncovered in the main text is primarily due to _within-population_ correlations (especially given the low number of sites with non-zero prevalence, **Supplementary Material S5**), it does suggest this may be the case.
 
 ```{r}
 #| echo: false
 #| message: false
-#| output: false
-### a draft version of a code for a figure, ignored for now
-# mod_corr$data |>
-#  select(SiteID) |>
-#  distinct() |>
-#  mutate(sigma_reflect_scaled=1) |>
-#  add_epred_draws(mod_corr) |>
-#  group_by(.category,SiteID) |>
-#  mean_qi() |>
-#  select(SiteID,.category,starts_with(".epred")) |>
-#  pivot_wider(names_from=.category,values_from = c(".epred",".epred.lower",".epred.upper")) |>
-#  ggplot()+
-#  geom_point(
-#    data=mod_corr$data |>
-#      group_by(SiteID) |>
-#      summarise(mean_reflect=mean(reflect_scaled),mean_nemhelix=mean(nematodes_genitalia)),
-#    aes(mean_reflect,mean_nemhelix),
-#    col="grey")+
-#  geom_segment(
-#    aes(
-#      x=.epred_reflectscaled,
-#      xend=.epred_reflectscaled,
-#      y=.epred.lower_nematodesgenitalia,
-#      yend=.epred.upper_nematodesgenitalia
-#      ))+
-#  geom_segment(
-#    aes(
-#      x=.epred.lower_reflectscaled,
-#      xend=.epred.upper_reflectscaled,
-#      y=.epred_nematodesgenitalia,
-#      yend=.epred_nematodesgenitalia)
-#    )+
-#  geom_point(
-#    aes(
-#      .epred_reflectscaled,.epred_nematodesgenitalia),
-#    pch=21,fill="white",size=4)+
-#  scale_x_continuous("Reflectance (scaled, for now)")+
-#  scale_y_continuous("Nemhelix prevalence")+
-#  theme_bw()
-```
-
-
-```{r}
-#| echo: false
-#| message: false
+#| fig-width: 3
+#| fig-height: 2.5
+#| fig-align: center
 ggplot(posterior_cor) +
-  stat_halfeye(aes(x = cor), .width = c(0, 0.95), fill = "#fab07c") +
+  stat_halfeye(aes(x = cor), .width = c(0, 0), fill = "#fab07c") +
   geom_vline(xintercept = 0, lty = 2) +
   scale_x_continuous("Among-sites correlation (posterior)", lim = c(-1, 1)) +
   scale_y_continuous("") +
@@ -564,7 +881,7 @@ ggplot(posterior_cor) +
 ```
 
 
-**Figure S5-1.** <!--Left: site-level _Nemhelix bakeri_ and average shell reflectance. Grey dots are observed means (ignoring measurement uncertainty for prevalence), while white dots and segments are model predictions and their 95% credible intervals. Right: -->Posterior distribution of the site-level correlation between _N. bakeri_ prevalence and shell reflectance.
+**Figure S6-1.** Posterior distribution of the site-level correlation between _N. bakeri_ prevalence and shell reflectance.
 
 
 # References

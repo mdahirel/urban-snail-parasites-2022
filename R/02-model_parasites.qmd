@@ -12,7 +12,6 @@ library(cmdstanr) # https://stan-dev.r-universe.dev v0.9.0
 library(ggtext) # CRAN v0.1.2
 library(ncf) # CRAN v1.3-2
 library(patchwork) # CRAN v1.3.0
-library(rptR) # CRAN v0.9.22
 library(sf) # CRAN v1.0-20
 library(tidyverse) # CRAN v2.0.0
 library(tidybayes) # CRAN v3.0.7

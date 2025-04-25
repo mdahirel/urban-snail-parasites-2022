@@ -1,6 +1,6 @@
 ---
 title: "How does urbanization shape shell phenotype, behaviour and parasite prevalence in the snail _Cornu aspersum_? - supplementary material"
-author: "Maxime Dahirel, Youna De Tombeur, Claudia Gérard, Armelle Ansart"
+author: "Maxime Dahirel, Youna de Tombeur, Claudia Gérard, Armelle Ansart"
 format: pdf
 editor_options: 
   chunk_output_type: console
